@@ -73,6 +73,9 @@ type MachineRpcHandlers = {
     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
     stopSession: (sessionId: string) => boolean;
     requestShutdown: () => void;
+    vscodeListInstances: () => any;
+    vscodeListSessions: (instanceId: string) => any;
+    vscodeSendMessage: (instanceId: string, sessionId: string, message: string) => any;
 }
 
 export class ApiMachineClient {
@@ -98,7 +101,10 @@ export class ApiMachineClient {
     setRPCHandlers({
         spawnSession,
         stopSession,
-        requestShutdown
+        requestShutdown,
+        vscodeListInstances,
+        vscodeListSessions,
+        vscodeSendMessage
     }: MachineRpcHandlers) {
         // Register spawn session handler
         this.rpcHandlerManager.registerHandler('spawn-happy-session', async (params: any) => {
@@ -153,6 +159,26 @@ export class ApiMachineClient {
             }, 100);
 
             return { message: 'Daemon stop request acknowledged, starting shutdown sequence...' };
+        });
+
+        this.rpcHandlerManager.registerHandler('vscode-list-instances', () => {
+            return { instances: vscodeListInstances() };
+        });
+
+        this.rpcHandlerManager.registerHandler('vscode-list-sessions', (params: any) => {
+            const { instanceId } = params || {};
+            if (!instanceId) {
+                throw new Error('instanceId is required');
+            }
+            return { sessions: vscodeListSessions(instanceId) };
+        });
+
+        this.rpcHandlerManager.registerHandler('vscode-send', (params: any) => {
+            const { instanceId, sessionId, message } = params || {};
+            if (!instanceId || !sessionId || !message) {
+                throw new Error('instanceId, sessionId, and message are required');
+            }
+            return vscodeSendMessage(instanceId, sessionId, message);
         });
     }
 

@@ -22,6 +22,8 @@ import { join } from 'path';
 import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
+import { VscodeBridge, type VscodeBridgeSnapshot } from './vscodeBridge';
+import type { ApiMachineClient } from '@/api/apiMachine';
 
 // Prepare initial metadata
 export const initialMachineMetadata: MachineMetadata = {
@@ -637,12 +639,27 @@ export async function startDaemon(): Promise<void> {
     };
 
     // Start control server
+    let latestVscodeSnapshot: VscodeBridgeSnapshot | null = null;
+    let apiMachine: ApiMachineClient | null = null;
+    const vscodeBridge = new VscodeBridge((snapshot) => {
+      latestVscodeSnapshot = snapshot;
+      if (apiMachine) {
+        void apiMachine.updateDaemonState((state) => ({
+          ...(state ?? {}),
+          vscode: snapshot
+        })).catch((error) => {
+          logger.debug('[DAEMON RUN] Failed to update daemon state with VS Code snapshot', error);
+        });
+      }
+    });
+
     const { port: controlPort, stop: stopControlServer } = await startDaemonControlServer({
       getChildren: getCurrentChildren,
       stopSession,
       spawnSession,
       requestShutdown: () => requestShutdown('happy-cli'),
-      onHappySessionWebhook
+      onHappySessionWebhook,
+      vscodeBridge
     });
 
     // Write initial daemon state (no lock needed for state file)
@@ -661,7 +678,8 @@ export async function startDaemon(): Promise<void> {
       status: 'offline',
       pid: process.pid,
       httpPort: controlPort,
-      startedAt: Date.now()
+      startedAt: Date.now(),
+      vscode: latestVscodeSnapshot ?? undefined
     };
 
     // Create API client
@@ -676,13 +694,22 @@ export async function startDaemon(): Promise<void> {
     logger.debug(`[DAEMON RUN] Machine registered: ${machine.id}`);
 
     // Create realtime machine session
-    const apiMachine = api.machineSyncClient(machine);
+    apiMachine = api.machineSyncClient(machine);
 
     // Set RPC handlers
     apiMachine.setRPCHandlers({
       spawnSession,
       stopSession,
-      requestShutdown: () => requestShutdown('happy-app')
+      requestShutdown: () => requestShutdown('happy-app'),
+      vscodeListInstances: () => vscodeBridge.listInstances(),
+      vscodeListSessions: (instanceId: string) => vscodeBridge.listSessions(instanceId),
+      vscodeSendMessage: (instanceId: string, sessionId: string, message: string) => {
+        const result = vscodeBridge.queueSendMessage(instanceId, sessionId, message);
+        if (!result) {
+          throw new Error('VS Code instance not found');
+        }
+        return result;
+      }
     });
 
     // Connect to server

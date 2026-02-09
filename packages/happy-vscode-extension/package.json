@@ -1,0 +1,71 @@
+{
+  "name": "happy-vscode-extension",
+  "displayName": "Happy VS Code Bridge",
+  "description": "Bridge Happy with VS Code chat sessions.",
+  "version": "0.0.1",
+  "publisher": "happy",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "*"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Happy VS Code Bridge",
+      "properties": {
+        "happy.vscode.daemonBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Override daemon base URL (e.g. http://127.0.0.1:8420). Leave empty to read daemon.state.json."
+        },
+        "happy.vscode.daemonHttpPort": {
+          "type": "number",
+          "default": 0,
+          "description": "Override daemon HTTP port. Leave 0 to read daemon.state.json."
+        },
+        "happy.vscode.daemonStatePath": {
+          "type": "string",
+          "default": "",
+          "description": "Override path to daemon.state.json. Leave empty to use HAPPY_HOME_DIR or ~/.happy."
+        },
+        "happy.vscode.autoStartDaemon": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the Happy daemon if it is not running."
+        },
+        "happy.vscode.scanIntervalMs": {
+          "type": "number",
+          "default": 15000,
+          "description": "Interval for scanning VS Code chat sessions."
+        },
+        "happy.vscode.heartbeatIntervalMs": {
+          "type": "number",
+          "default": 30000,
+          "description": "Interval for sending heartbeat to the Happy daemon."
+        },
+        "happy.vscode.commandPollIntervalMs": {
+          "type": "number",
+          "default": 1500,
+          "description": "Interval for polling commands from the Happy daemon."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "watch": "tsc -watch -p ."
+  },
+  "dependencies": {
+    "sql.js": "^1.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.9.3"
+  }
+}

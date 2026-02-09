@@ -8,7 +8,7 @@ import { Typography } from '@/constants/Typography';
 import { useSessions, useAllMachines, useMachine } from '@/sync/storage';
 import { Ionicons, Octicons } from '@expo/vector-icons';
 import type { Session } from '@/sync/storageTypes';
-import { machineStopDaemon, machineUpdateMetadata } from '@/sync/ops';
+import { machineStopDaemon, machineUpdateMetadata, machineSendVscodeMessage } from '@/sync/ops';
 import { Modal } from '@/modal';
 import { formatPathRelativeToHome, getSessionName, getSessionSubtitle } from '@/utils/sessionUtils';
 import { isMachineOnline } from '@/utils/machineUtils';
@@ -62,6 +62,37 @@ const styles = StyleSheet.create((theme) => ({
     },
 }));
 
+type VscodeInstanceSummary = {
+    instanceId: string;
+    appName: string;
+    appVersion: string;
+    platform: string;
+    pid: number;
+    workspaceFolders: string[];
+    workspaceFile?: string | null;
+    lastSeen: number;
+};
+
+type VscodeSessionSummary = {
+    instanceId: string;
+    id: string;
+    title: string;
+    lastMessageDate: number;
+    needsInput: boolean;
+    source: 'workspace' | 'empty-window';
+    workspaceId?: string;
+    workspaceDir?: string;
+    displayName?: string;
+    jsonPath: string;
+};
+
+type VscodeBridgeSnapshot = {
+    instances: VscodeInstanceSummary[];
+    sessions: VscodeSessionSummary[];
+    needsInputCount: number;
+    updatedAt: number;
+};
+
 export default function MachineDetailScreen() {
     const { theme } = useUnistyles();
     const { id: machineId } = useLocalSearchParams<{ id: string }>();
@@ -108,6 +139,23 @@ export default function MachineDetailScreen() {
         if (showAllPaths) return recentPaths;
         return recentPaths.slice(0, 5);
     }, [recentPaths, showAllPaths]);
+
+    const vscodeState = (machine?.daemonState as any)?.vscode as VscodeBridgeSnapshot | undefined;
+    const vscodeInstances = vscodeState?.instances ?? [];
+    const vscodeSessions = vscodeState?.sessions ?? [];
+
+    const vscodeSessionsByInstance = useMemo(() => {
+        const map = new Map<string, VscodeSessionSummary[]>();
+        vscodeSessions.forEach((session) => {
+            const list = map.get(session.instanceId) ?? [];
+            list.push(session);
+            map.set(session.instanceId, list);
+        });
+        for (const sessions of map.values()) {
+            sessions.sort((a, b) => (b.lastMessageDate ?? 0) - (a.lastMessageDate ?? 0));
+        }
+        return map;
+    }, [vscodeSessions]);
 
     // Determine daemon status from metadata
     const daemonStatus = useMemo(() => {
@@ -201,6 +249,35 @@ export default function MachineDetailScreen() {
             } finally {
                 setIsRenamingMachine(false);
             }
+        }
+    };
+
+    const handleSendVscodeMessage = async (instanceId: string, session: VscodeSessionSummary) => {
+        if (!machineId) return;
+
+        const message = await Modal.prompt(
+            t('machine.vscodeSendMessage'),
+            session.title,
+            {
+                placeholder: t('machine.vscodeMessagePlaceholder'),
+                cancelText: t('common.cancel'),
+                confirmText: t('common.send')
+            }
+        );
+
+        if (!message || !message.trim()) {
+            return;
+        }
+
+        try {
+            const result = await machineSendVscodeMessage(machineId, instanceId, session.id, message.trim());
+            if (!result.queued) {
+                Modal.alert(t('common.error'), t('machine.vscodeSendFailed'));
+                return;
+            }
+            Modal.alert(t('common.success'), t('machine.vscodeSendQueued'));
+        } catch (error) {
+            Modal.alert(t('common.error'), error instanceof Error ? error.message : t('machine.vscodeSendFailed'));
         }
     };
 
@@ -486,6 +563,47 @@ export default function MachineDetailScreen() {
                             subtitle={String(machine.daemonStateVersion)}
                         />
                 </ItemGroup>
+
+                {/* VS Code Bridge */}
+                {machine.daemonState && (
+                    <ItemGroup title={t('machine.vscodeBridge')}>
+                        {vscodeInstances.length === 0 && (
+                            <Item
+                                title={t('machine.vscodeNoInstances')}
+                                subtitle={t('machine.vscodeNoInstancesSubtitle')}
+                                subtitleLines={0}
+                                showChevron={false}
+                            />
+                        )}
+                        {vscodeInstances.map((instance) => {
+                            const sessions = vscodeSessionsByInstance.get(instance.instanceId) ?? [];
+                            const lastSeen = new Date(instance.lastSeen).toLocaleString();
+                            return (
+                                <React.Fragment key={instance.instanceId}>
+                                    <Item
+                                        title={instance.appName}
+                                        subtitle={`${instance.appVersion} • ${instance.platform} • ${t('machine.vscodeLastSeen', { time: lastSeen })}`}
+                                        subtitleLines={0}
+                                        showChevron={false}
+                                    />
+                                    {sessions.map((session) => (
+                                        <Item
+                                            key={`${instance.instanceId}:${session.id}`}
+                                            title={session.title}
+                                            subtitle={session.displayName ?? (session.source === 'empty-window' ? t('machine.vscodeEmptyWindow') : t('machine.vscodeWorkspace'))}
+                                            subtitleLines={1}
+                                            detail={session.needsInput ? t('machine.vscodeNeedsInput') : undefined}
+                                            detailStyle={session.needsInput ? { color: '#FF3B30' } : undefined}
+                                            leftElement={<Ionicons name={session.needsInput ? 'alert-circle' : 'chatbubble-ellipses-outline'} size={18} color={session.needsInput ? '#FF3B30' : theme.colors.textSecondary} />}
+                                            onPress={() => handleSendVscodeMessage(instance.instanceId, session)}
+                                            showChevron
+                                        />
+                                    ))}
+                                </React.Fragment>
+                            );
+                        })}
+                    </ItemGroup>
+                )}
 
                 {/* Previous Sessions (debug view) */}
                 {previousSessions.length > 0 && (

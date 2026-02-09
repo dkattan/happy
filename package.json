@@ -1,11 +1,29 @@
 {
     "name": "monorepo",
     "private": true,
+    "devDependencies": {
+        "@playwright/test": "^1.58.2"
+    },
+    "scripts": {
+        "vscode:bridge:build": "yarn --cwd packages/happy-vscode-extension build",
+        "vscode:bridge:dev": "code --extensionDevelopmentPath \"./packages/happy-vscode-extension\" --new-window && yarn vscode:bridge:tail-logs",
+        "vscode:bridge:package": "node packages/happy-vscode-extension/scripts/package-vsix.js",
+        "vscode:bridge:install": "code --install-extension \"./packages/happy-vscode-extension/dist/happy-vscode-extension.vsix\"",
+        "vscode:bridge:install-and-open": "yarn vscode:bridge:build && yarn vscode:bridge:package && yarn vscode:bridge:install && code --new-window && yarn vscode:bridge:tail",
+        "vscode:bridge:tail": "powershell -ExecutionPolicy Bypass -File \"./packages/happy-vscode-extension/scripts/tail-vscode-log.ps1\"",
+        "vscode:bridge:tail-output": "powershell -ExecutionPolicy Bypass -File \"./packages/happy-vscode-extension/scripts/tail-happy-output.ps1\"",
+        "vscode:bridge:tail-logs": "yarn vscode:bridge:tail",
+        "vscode:bridge:diagnose": "yarn vscode:bridge:install-and-open && yarn vscode:bridge:tail",
+        "happy:web:dev": "powershell -ExecutionPolicy Bypass -File \"./scripts/happy-web-dev.ps1\"",
+        "happy:web:test": "powershell -ExecutionPolicy Bypass -File \"./scripts/happy-web-test.ps1\"",
+        "test:playwright": "npx playwright test"
+    },
     "workspaces": {
         "packages": [
             "packages/happy-app",
             "packages/happy-cli",
-            "packages/happy-server"
+            "packages/happy-server",
+            "packages/happy-vscode-extension"
         ],
         "nohoist": [
             "**/zod",

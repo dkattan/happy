@@ -197,6 +197,27 @@ export async function machineStopDaemon(machineId: string): Promise<{ message: s
 }
 
 /**
+ * Send a message to a VS Code chat session via the daemon bridge.
+ */
+export async function machineSendVscodeMessage(
+    machineId: string,
+    instanceId: string,
+    sessionId: string,
+    message: string
+): Promise<{ queued: boolean; commandId?: string }> {
+    const result = await apiSocket.machineRPC<{ queued: boolean; commandId?: string }, {
+        instanceId: string;
+        sessionId: string;
+        message: string;
+    }>(
+        machineId,
+        'vscode-send',
+        { instanceId, sessionId, message }
+    );
+    return result;
+}
+
+/**
  * Execute a bash command on a specific machine
  */
 export async function machineBash(

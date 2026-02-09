@@ -39,6 +39,7 @@ import { fetchFeed } from './apiFeed';
 import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
 import { initializeTodoSync } from '../-zen/model/ops';
+import { t } from '@/text';
 
 class Sync {
     // Spawned agents (especially in spawn mode) can take noticeable time to connect.
@@ -69,6 +70,7 @@ class Sync {
     private activityAccumulator: ActivityUpdateAccumulator;
     private pendingSettings: Partial<Settings> = loadPendingSettings();
     revenueCatInitialized = false;
+    private vscodeNeedsInputCache = new Map<string, Set<string>>();
 
     // Generic locking mechanism
     private recalculationLockCount = 0;
@@ -1760,6 +1762,8 @@ class Sync {
                 }
             }
 
+            await this.handleVscodeNeedsInputNotification(machineId, machine, updatedMachine);
+
             // Update storage using applyMachines which rebuilds sessionListViewData
             storage.getState().applyMachines([updatedMachine]);
         } else if (updateData.body.t === 'relationship-updated') {
@@ -2006,6 +2010,56 @@ class Sync {
         }
 
         // daemon-status ephemeral updates are deprecated, machine status is handled via machine-activity
+    }
+
+    private async handleVscodeNeedsInputNotification(machineId: string, previous: Machine | undefined, updated: Machine): Promise<void> {
+        if (Platform.OS === 'web') return;
+
+        const previousSessions = previous?.daemonState?.vscode?.sessions ?? null;
+        const currentSessions = updated.daemonState?.vscode?.sessions ?? null;
+
+        if (!currentSessions) {
+            this.vscodeNeedsInputCache.delete(machineId);
+            return;
+        }
+
+        const makeKey = (instanceId: string, sessionId: string) => `${instanceId}:${sessionId}`;
+        const currentNeeds = new Set<string>(
+            currentSessions.filter(s => s.needsInput).map(s => makeKey(s.instanceId, s.id))
+        );
+
+        const previousNeeds = this.vscodeNeedsInputCache.get(machineId);
+        if (!previousNeeds) {
+            this.vscodeNeedsInputCache.set(machineId, currentNeeds);
+            return;
+        }
+
+        const newlyNeeded = Array.from(currentNeeds).filter(key => !previousNeeds.has(key));
+        this.vscodeNeedsInputCache.set(machineId, currentNeeds);
+
+        if (newlyNeeded.length === 0) return;
+
+        const { status } = await Notifications.getPermissionsAsync();
+        if (status !== 'granted') return;
+
+        const machineName = updated.metadata?.displayName || updated.metadata?.host || machineId;
+        let body = t('machine.vscodeNotificationBodyMultiple', { count: newlyNeeded.length });
+        if (newlyNeeded.length === 1) {
+            const [instanceId, sessionId] = newlyNeeded[0].split(':');
+            const session = currentSessions.find(s => s.instanceId === instanceId && s.id === sessionId);
+            if (session?.title) {
+                body = t('machine.vscodeNotificationBodySingle', { title: session.title });
+            }
+        }
+
+        await Notifications.scheduleNotificationAsync({
+            content: {
+                title: t('machine.vscodeNotificationTitle', { machine: machineName }),
+                body,
+                data: { machineId }
+            },
+            trigger: null
+        });
     }
 
     //

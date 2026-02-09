@@ -194,6 +194,42 @@ export const MachineMetadataSchema = z.object({
 export type MachineMetadata = z.infer<typeof MachineMetadataSchema>
 
 /**
+ * VS Code bridge state
+ */
+export const VscodeSessionSummarySchema = z.object({
+  instanceId: z.string(),
+  id: z.string(),
+  title: z.string(),
+  lastMessageDate: z.number(),
+  needsInput: z.boolean(),
+  source: z.union([z.literal('workspace'), z.literal('empty-window')]),
+  workspaceId: z.string().optional(),
+  workspaceDir: z.string().optional(),
+  displayName: z.string().optional(),
+  jsonPath: z.string()
+});
+
+export const VscodeInstanceSummarySchema = z.object({
+  instanceId: z.string(),
+  appName: z.string(),
+  appVersion: z.string(),
+  platform: z.string(),
+  pid: z.number(),
+  workspaceFolders: z.array(z.string()),
+  workspaceFile: z.string().nullable().optional(),
+  lastSeen: z.number()
+});
+
+export const VscodeBridgeSnapshotSchema = z.object({
+  instances: z.array(VscodeInstanceSummarySchema),
+  sessions: z.array(VscodeSessionSummarySchema),
+  needsInputCount: z.number(),
+  updatedAt: z.number()
+});
+
+export type VscodeBridgeSnapshot = z.infer<typeof VscodeBridgeSnapshotSchema>;
+
+/**
  * Daemon state - dynamic runtime information (frequently updated)
  */
 export const DaemonStateSchema = z.object({
@@ -209,7 +245,8 @@ export const DaemonStateSchema = z.object({
     z.union([
       z.enum(['mobile-app', 'cli', 'os-signal', 'unknown']),
       z.string() // Forward compatibility
-    ]).optional()
+    ]).optional(),
+  vscode: VscodeBridgeSnapshotSchema.optional()
 })
 
 export type DaemonState = z.infer<typeof DaemonStateSchema>

@@ -59,6 +59,7 @@ export const it: TranslationStructure = {
         retry: 'Riprova',
         delete: 'Elimina',
         optional: 'opzionale',
+        send: 'Send',
         saveAs: 'Salva con nome',
     },
 
@@ -770,6 +771,20 @@ export const it: TranslationStructure = {
         metadataVersion: 'Versione metadati',
         untitledSession: 'Sessione senza titolo',
         back: 'Indietro',
+        vscodeBridge: 'VS Code',
+        vscodeNoInstances: 'No VS Code instances detected',
+        vscodeNoInstancesSubtitle: 'Start VS Code with the Happy bridge extension enabled',
+        vscodeLastSeen: ({ time }: { time: string }) => `Last seen ${time}`,
+        vscodeSendMessage: 'Send message to VS Code',
+        vscodeMessagePlaceholder: 'Type your message...',
+        vscodeSendQueued: 'Message queued in VS Code',
+        vscodeSendFailed: 'Failed to send message',
+        vscodeNeedsInput: 'Needs input',
+        vscodeEmptyWindow: 'Empty window',
+        vscodeWorkspace: 'Workspace',
+        vscodeNotificationTitle: ({ machine }: { machine: string }) => `${machine}: VS Code needs your reply`,
+        vscodeNotificationBodySingle: ({ title }: { title: string }) => `Reply in "${title}"`,
+        vscodeNotificationBodyMultiple: ({ count }: { count: number }) => `${count} VS Code chats are waiting`,
     },
 
     message: {

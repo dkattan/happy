@@ -10,19 +10,22 @@ import { logger } from '@/ui/logger';
 import { Metadata } from '@/api/types';
 import { TrackedSession } from './types';
 import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/registerCommonHandlers';
+import { VscodeBridge } from './vscodeBridge';
 
 export function startDaemonControlServer({
   getChildren,
   stopSession,
   spawnSession,
   requestShutdown,
-  onHappySessionWebhook
+  onHappySessionWebhook,
+  vscodeBridge
 }: {
   getChildren: () => TrackedSession[];
   stopSession: (sessionId: string) => boolean;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
   requestShutdown: () => void;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
+  vscodeBridge: VscodeBridge;
 }): Promise<{ port: number; stop: () => Promise<void> }> {
   return new Promise((resolve) => {
     const app = fastify({
@@ -54,6 +57,151 @@ export function startDaemonControlServer({
       onHappySessionWebhook(sessionId, metadata);
 
       return { status: 'ok' as const };
+    });
+
+    typed.post('/vscode/register', {
+      schema: {
+        body: z.object({
+          instanceId: z.string(),
+          appName: z.string(),
+          appVersion: z.string(),
+          platform: z.string(),
+          pid: z.number(),
+          workspaceFolders: z.array(z.string()),
+          workspaceFile: z.string().nullable().optional()
+        }),
+        response: {
+          200: z.object({ ok: z.literal(true) })
+        }
+      }
+    }, async (request) => {
+      const meta = request.body;
+      vscodeBridge.register(meta);
+      logger.debug(`[CONTROL SERVER] VS Code registered: ${meta.instanceId}`);
+      return { ok: true as const };
+    });
+
+    typed.post('/vscode/heartbeat', {
+      schema: {
+        body: z.object({ instanceId: z.string() }),
+        response: { 200: z.object({ ok: z.literal(true) }) }
+      }
+    }, async (request, reply) => {
+      const ok = vscodeBridge.heartbeat(request.body.instanceId);
+      if (!ok) {
+        reply.code(404);
+        return { ok: false } as any;
+      }
+      return { ok: true as const };
+    });
+
+    typed.post('/vscode/sessions', {
+      schema: {
+        body: z.object({
+          instanceId: z.string(),
+          sessions: z.array(z.object({
+            id: z.string(),
+            title: z.string(),
+            lastMessageDate: z.number(),
+            needsInput: z.boolean(),
+            source: z.union([z.literal('workspace'), z.literal('empty-window')]),
+            workspaceId: z.string().optional(),
+            workspaceDir: z.string().optional(),
+            displayName: z.string().optional(),
+            jsonPath: z.string()
+          }))
+        }),
+        response: { 200: z.object({ ok: z.literal(true) }) }
+      }
+    }, async (request, reply) => {
+      const ok = vscodeBridge.updateSessions(request.body.instanceId, request.body.sessions);
+      if (!ok) {
+        reply.code(404);
+        return { ok: false } as any;
+      }
+      return { ok: true as const };
+    });
+
+    typed.get('/vscode/instances', {
+      schema: {
+        response: {
+          200: z.object({
+            instances: z.array(z.object({
+              instanceId: z.string(),
+              appName: z.string(),
+              appVersion: z.string(),
+              platform: z.string(),
+              pid: z.number(),
+              workspaceFolders: z.array(z.string()),
+              workspaceFile: z.string().nullable().optional(),
+              lastSeen: z.number()
+            }))
+          })
+        }
+      }
+    }, async () => {
+      const instances = vscodeBridge.listInstances();
+      return { instances };
+    });
+
+    typed.get('/vscode/instances/:instanceId/sessions', {
+      schema: {
+        params: z.object({ instanceId: z.string() }),
+        response: {
+          200: z.object({ sessions: z.array(z.any()) })
+        }
+      }
+    }, async (request, reply) => {
+      if (!vscodeBridge.hasInstance(request.params.instanceId)) {
+        reply.code(404);
+        return { sessions: [] };
+      }
+      const sessions = vscodeBridge.listSessions(request.params.instanceId);
+      return { sessions };
+    });
+
+    typed.post('/vscode/instances/:instanceId/send', {
+      schema: {
+        params: z.object({ instanceId: z.string() }),
+        body: z.object({ sessionId: z.string(), message: z.string() }),
+        response: { 200: z.object({ queued: z.literal(true), commandId: z.string() }) }
+      }
+    }, async (request, reply) => {
+      const queued = vscodeBridge.queueSendMessage(request.params.instanceId, request.body.sessionId, request.body.message);
+      if (!queued) {
+        reply.code(404);
+        return { queued: false } as any;
+      }
+      return { queued: true as const, commandId: queued.commandId };
+    });
+
+    typed.get('/vscode/instances/:instanceId/commands', {
+      schema: {
+        params: z.object({ instanceId: z.string() }),
+        response: { 200: z.object({ commands: z.array(z.any()) }) }
+      }
+    }, async (request, reply) => {
+      if (!vscodeBridge.hasInstance(request.params.instanceId)) {
+        reply.code(404);
+        return { commands: [] };
+      }
+      const commands = vscodeBridge.listCommands(request.params.instanceId);
+      return { commands };
+    });
+
+    typed.post('/vscode/instances/:instanceId/commands/:commandId/ack', {
+      schema: {
+        params: z.object({ instanceId: z.string(), commandId: z.string() }),
+        body: z.object({ ok: z.boolean() }),
+        response: { 200: z.object({ ok: z.literal(true) }) }
+      }
+    }, async (request, reply) => {
+      const ok = vscodeBridge.ackCommand(request.params.instanceId, request.params.commandId);
+      if (!ok) {
+        reply.code(404);
+        return { ok: false } as any;
+      }
+      return { ok: true as const };
     });
 
     // List all tracked sessions
