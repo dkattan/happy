@@ -2015,8 +2015,15 @@ class Sync {
     private async handleVscodeNeedsInputNotification(machineId: string, previous: Machine | undefined, updated: Machine): Promise<void> {
         if (Platform.OS === 'web') return;
 
-        const previousSessions = previous?.daemonState?.vscode?.sessions ?? null;
-        const currentSessions = updated.daemonState?.vscode?.sessions ?? null;
+        type VscodeBridgeSession = {
+            instanceId: string;
+            id: string;
+            title?: string;
+            needsInput: boolean;
+        };
+
+        const previousSessions = (previous?.daemonState?.vscode?.sessions as VscodeBridgeSession[] | undefined) ?? null;
+        const currentSessions = (updated.daemonState?.vscode?.sessions as VscodeBridgeSession[] | undefined) ?? null;
 
         if (!currentSessions) {
             this.vscodeNeedsInputCache.delete(machineId);

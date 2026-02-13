@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import os from 'os';
 import * as tmp from 'tmp';
+import { spawn, spawnSync } from 'child_process';
 
 import { ApiClient } from '@/api/api';
 import { TrackedSession } from './types';
@@ -645,7 +646,7 @@ export async function startDaemon(): Promise<void> {
       latestVscodeSnapshot = snapshot;
       if (apiMachine) {
         void apiMachine.updateDaemonState((state) => ({
-          ...(state ?? {}),
+          ...(state ?? { status: 'running' }),
           vscode: snapshot
         })).catch((error) => {
           logger.debug('[DAEMON RUN] Failed to update daemon state with VS Code snapshot', error);
@@ -696,6 +697,53 @@ export async function startDaemon(): Promise<void> {
     // Create realtime machine session
     apiMachine = api.machineSyncClient(machine);
 
+    const isCommandAvailable = (command: string): boolean => {
+      const whichCommand = process.platform === 'win32' ? 'where' : 'which';
+      const result = spawnSync(whichCommand, [command], { stdio: 'ignore' });
+      return result.status === 0;
+    };
+
+    const launchVscodeWindow = (options: {
+      workspaceDir?: string;
+      workspaceFile?: string;
+      newWindow?: boolean;
+      appTarget?: 'vscode' | 'insiders';
+    }): { launched: true; args: string[] } => {
+      const args: string[] = [];
+      if (options.newWindow !== false) {
+        args.push('--new-window');
+      }
+
+      const targetPath = options.workspaceFile || options.workspaceDir;
+      if (targetPath && targetPath.trim().length > 0) {
+        args.push(targetPath);
+      }
+
+      const preferredCommand = options.appTarget === 'insiders' ? 'code-insiders' : 'code';
+      if (!isCommandAvailable(preferredCommand)) {
+        const shellSetupHint = options.appTarget === 'insiders'
+          ? "Install 'code-insiders' in PATH from VS Code Insiders (Command Palette -> 'Shell Command: Install \"code-insiders\" command in PATH')."
+          : "Install 'code' in PATH from VS Code (Command Palette -> 'Shell Command: Install \"code\" command in PATH').";
+        throw new Error(`${preferredCommand} command not found. ${shellSetupHint}`);
+      }
+
+      const child = spawn(preferredCommand, args, {
+        detached: true,
+        stdio: 'ignore',
+        env: {
+          ...process.env,
+          HAPPY_HOME_DIR: configuration.happyHomeDir
+        }
+      });
+      child.unref();
+      logger.debug('[DAEMON RUN] Launched VS Code', {
+        command: preferredCommand,
+        args,
+        happyHome: configuration.happyHomeDir
+      });
+      return { launched: true, args };
+    };
+
     // Set RPC handlers
     apiMachine.setRPCHandlers({
       spawnSession,
@@ -709,6 +757,52 @@ export async function startDaemon(): Promise<void> {
           throw new Error('VS Code instance not found');
         }
         return result;
+      },
+      vscodeGetSessionHistory: (instanceId: string, sessionId: string, limit?: number) =>
+        vscodeBridge.getSessionHistory(instanceId, sessionId, limit),
+      vscodeOpenSession: ({ instanceId, sessionId, workspaceDir, workspaceFile, newWindow, appTarget }: {
+        instanceId?: string;
+        sessionId?: string;
+        workspaceDir?: string;
+        workspaceFile?: string;
+        newWindow?: boolean;
+        appTarget?: 'vscode' | 'insiders';
+      }) => {
+        const resolvedInstanceId = (
+          (instanceId && vscodeBridge.hasInstance(instanceId) ? instanceId : null) ??
+          (sessionId ? vscodeBridge.findSessionInstance(sessionId) : null) ??
+          vscodeBridge.findInstanceForWorkspace(workspaceDir, workspaceFile)
+        );
+
+        // Respect explicit new-window requests: do not silently reuse a live instance.
+        if (resolvedInstanceId && sessionId && newWindow !== true) {
+          const queued = vscodeBridge.queueOpenSession(resolvedInstanceId, sessionId);
+          if (queued) {
+            logger.debug('[DAEMON RUN] Queued VS Code openSession command', {
+              instanceId: resolvedInstanceId,
+              sessionId
+            });
+            return {
+              ok: true,
+              mode: 'queued',
+              instanceId: resolvedInstanceId,
+              commandId: queued.commandId
+            };
+          }
+        }
+
+        try {
+          const launched = launchVscodeWindow({ workspaceDir, workspaceFile, newWindow, appTarget });
+          return {
+            ok: true,
+            mode: 'launched',
+            ...launched
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          logger.debug('[DAEMON RUN] Failed to launch VS Code', { message });
+          throw new Error(`Failed to launch VS Code: ${message}`);
+        }
       }
     });
 

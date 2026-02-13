@@ -25,10 +25,23 @@ export type VscodeSessionSummary = {
 
 export type VscodeCommand = {
   id: string;
-  type: 'sendMessage';
-  sessionId: string;
-  message: string;
   createdAt: number;
+} & (
+  {
+    type: 'sendMessage';
+    sessionId: string;
+    message: string;
+  } | {
+    type: 'openSession';
+    sessionId: string;
+  }
+);
+
+export type VscodeConversationMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  timestamp: number;
 };
 
 export type DaemonClientConfig = {
@@ -48,6 +61,10 @@ export class DaemonClient {
 
   async updateSessions(instanceId: string, sessions: VscodeSessionSummary[]): Promise<void> {
     await this.post('/vscode/sessions', { instanceId, sessions });
+  }
+
+  async updateLiveHistory(instanceId: string, sessionId: string, messages: VscodeConversationMessage[], updatedAt: number): Promise<void> {
+    await this.post('/vscode/live-history', { instanceId, sessionId, messages, updatedAt });
   }
 
   async getCommands(instanceId: string): Promise<VscodeCommand[]> {

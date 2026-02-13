@@ -1,3 +1,5 @@
 {
-    "prisma.pinToPrisma6": true
+  "prisma.pinToPrisma6": true,
+  "happy.vscode.daemonStatePath": "/Users/darrenkattan/.happy-dev/daemon.state.json",
+  "happy.vscode.chatSendTarget": "panel"
 }

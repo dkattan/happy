@@ -6,6 +6,7 @@ import { useConnectTerminal } from '@/hooks/useConnectTerminal';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { useSocketStatus } from '@/sync/storage';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -88,23 +89,27 @@ const stylesheet = StyleSheet.create((theme) => ({
 export function EmptyMainScreen() {
     const { connectTerminal, connectWithUrl, isLoading } = useConnectTerminal();
     const { theme } = useUnistyles();
+    const socketStatus = useSocketStatus();
     const styles = stylesheet;
+    const isConnected = socketStatus.status === 'connected';
 
     return (
         <View style={styles.container}>
             {/* Terminal-style code block */}
-            <Text style={styles.title}>{t('components.emptyMainScreen.readyToCode')}</Text>
+            <Text style={styles.title}>
+                {isConnected ? 'Connected. No terminals yet.' : t('components.emptyMainScreen.readyToCode')}
+            </Text>
             <View style={styles.terminalBlock}>
                 <Text style={[styles.terminalText, styles.terminalTextFirst]}>
-                    $ npm i -g happy-coder
+                    {isConnected ? '$ happy daemon start' : '$ npm i -g happy-coder'}
                 </Text>
                 <Text style={styles.terminalText}>
-                    $ happy
+                    {isConnected ? '$ yarn vscode:bridge:diagnose' : '$ happy'}
                 </Text>
             </View>
 
 
-            {Platform.OS !== 'web' && (
+            {!isConnected && Platform.OS !== 'web' && (
                 <>
                     <View style={styles.stepsContainer}>
                         <View style={styles.stepRow}>

@@ -14,6 +14,10 @@
         "vscode:bridge:tail-output": "powershell -ExecutionPolicy Bypass -File \"./packages/happy-vscode-extension/scripts/tail-happy-output.ps1\"",
         "vscode:bridge:tail-logs": "yarn vscode:bridge:tail",
         "vscode:bridge:diagnose": "yarn vscode:bridge:install-and-open && yarn vscode:bridge:tail",
+        "vscode:bridge:smoke": "node ./scripts/vscode-bridge-smoke.mjs",
+        "ios:copilot:dev": "bash ./scripts/happy-ios-copilot-dev.sh",
+        "ios:copilot:dev:insiders": "HAPPY_VSCODE_APP=insiders bash ./scripts/happy-ios-copilot-dev.sh",
+        "ios:copilot:dev:rebuild": "HAPPY_FORCE_IOS_REBUILD=1 bash ./scripts/happy-ios-copilot-dev.sh",
         "happy:web:dev": "powershell -ExecutionPolicy Bypass -File \"./scripts/happy-web-dev.ps1\"",
         "happy:web:test": "powershell -ExecutionPolicy Bypass -File \"./scripts/happy-web-test.ps1\"",
         "test:playwright": "npx playwright test"

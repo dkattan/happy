@@ -37,6 +37,11 @@ export function useVisibleSessionListViewData(): SessionListViewItem[] | null {
 
             if (item.type === 'active-sessions') {
                 filtered.push(item);
+                continue;
+            }
+
+            if (item.type === 'copilot-sessions') {
+                filtered.push(item);
             }
         }
 

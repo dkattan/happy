@@ -8,7 +8,7 @@ import { Typography } from '@/constants/Typography';
 import { useSessions, useAllMachines, useMachine } from '@/sync/storage';
 import { Ionicons, Octicons } from '@expo/vector-icons';
 import type { Session } from '@/sync/storageTypes';
-import { machineStopDaemon, machineUpdateMetadata, machineSendVscodeMessage } from '@/sync/ops';
+import { machineStopDaemon, machineUpdateMetadata, machineSendVscodeMessage, machineOpenVscodeSession } from '@/sync/ops';
 import { Modal } from '@/modal';
 import { formatPathRelativeToHome, getSessionName, getSessionSubtitle } from '@/utils/sessionUtils';
 import { isMachineOnline } from '@/utils/machineUtils';
@@ -102,6 +102,7 @@ export default function MachineDetailScreen() {
     const navigateToSession = useNavigateToSession();
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [isStoppingDaemon, setIsStoppingDaemon] = useState(false);
+    const [isOpeningVscode, setIsOpeningVscode] = useState(false);
     const [isRenamingMachine, setIsRenamingMachine] = useState(false);
     const [customPath, setCustomPath] = useState('');
     const [isSpawning, setIsSpawning] = useState(false);
@@ -208,6 +209,34 @@ export default function MachineDetailScreen() {
         setIsRefreshing(true);
         await sync.refreshMachines();
         setIsRefreshing(false);
+    };
+
+    const handleOpenVscodeWindow = async (appTarget: 'vscode' | 'insiders' = 'vscode') => {
+        if (!machineId) return;
+        setIsOpeningVscode(true);
+        try {
+            const fallbackWorkspaceDir = machine?.metadata?.homeDir;
+            const result = await machineOpenVscodeSession(machineId, {
+                workspaceDir: fallbackWorkspaceDir,
+                newWindow: true,
+                appTarget,
+            });
+            if (!result.ok) {
+                throw new Error('Failed to open VS Code.');
+            }
+            const appLabel = appTarget === 'insiders' ? 'VS Code Insiders' : 'VS Code';
+            Modal.alert(
+                t('common.success'),
+                result.mode === 'queued'
+                    ? `Requested an active ${appLabel} window to open.`
+                    : `Launched ${appLabel}.`
+            );
+            await sync.refreshMachines();
+        } catch (error) {
+            Modal.alert(t('common.error'), error instanceof Error ? error.message : 'Failed to open VS Code.');
+        } finally {
+            setIsOpeningVscode(false);
+        }
     };
 
     const handleRenameMachine = async () => {
@@ -567,6 +596,24 @@ export default function MachineDetailScreen() {
                 {/* VS Code Bridge */}
                 {machine.daemonState && (
                     <ItemGroup title={t('machine.vscodeBridge')}>
+                        <Item
+                            title="Open VS Code window"
+                            subtitle={machine?.metadata?.homeDir || undefined}
+                            subtitleLines={1}
+                            onPress={isOpeningVscode ? undefined : () => handleOpenVscodeWindow('vscode')}
+                            detail={isOpeningVscode ? 'Opening…' : undefined}
+                            leftElement={<Ionicons name="open-outline" size={18} color={theme.colors.textSecondary} />}
+                            showChevron={!isOpeningVscode}
+                        />
+                        <Item
+                            title="Open VS Code Insiders window"
+                            subtitle={machine?.metadata?.homeDir || undefined}
+                            subtitleLines={1}
+                            onPress={isOpeningVscode ? undefined : () => handleOpenVscodeWindow('insiders')}
+                            detail={isOpeningVscode ? 'Opening…' : undefined}
+                            leftElement={<Ionicons name="open-outline" size={18} color={theme.colors.textSecondary} />}
+                            showChevron={!isOpeningVscode}
+                        />
                         {vscodeInstances.length === 0 && (
                             <Item
                                 title={t('machine.vscodeNoInstances')}

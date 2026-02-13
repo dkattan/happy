@@ -52,6 +52,15 @@
           "type": "number",
           "default": 1500,
           "description": "Interval for polling commands from the Happy daemon."
+        },
+        "happy.vscode.chatSendTarget": {
+          "type": "string",
+          "enum": [
+            "editor",
+            "panel"
+          ],
+          "default": "editor",
+          "description": "Where to send chat commands: open the session in an editor tab, or keep input in the Chat sidebar/panel."
         }
       }
     }

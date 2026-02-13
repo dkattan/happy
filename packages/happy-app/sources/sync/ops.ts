@@ -218,6 +218,83 @@ export async function machineSendVscodeMessage(
 }
 
 /**
+ * Ask daemon to focus/open a VS Code Copilot chat session in an existing VS Code window,
+ * or launch VS Code (optionally on a target workspace) when no instance is available.
+ */
+export type VscodeAppTarget = 'vscode' | 'insiders';
+
+export async function machineOpenVscodeSession(
+    machineId: string,
+    params: {
+        instanceId?: string;
+        sessionId?: string;
+        workspaceDir?: string;
+        workspaceFile?: string;
+        newWindow?: boolean;
+        appTarget?: VscodeAppTarget;
+    }
+): Promise<{ ok: boolean; mode: 'queued' | 'launched'; instanceId?: string; commandId?: string; args?: string[] }> {
+    const result = await apiSocket.machineRPC<{ ok: boolean; mode: 'queued' | 'launched'; instanceId?: string; commandId?: string; args?: string[] }, {
+        instanceId?: string;
+        sessionId?: string;
+        workspaceDir?: string;
+        workspaceFile?: string;
+        newWindow?: boolean;
+        appTarget?: VscodeAppTarget;
+    }>(
+        machineId,
+        'vscode-open-session',
+        params
+    );
+    return result;
+}
+
+export interface VscodeConversationMessage {
+    id: string;
+    role: 'user' | 'assistant';
+    text: string;
+    timestamp: number;
+}
+
+export interface VscodeConversationHistory {
+    session: {
+        instanceId: string;
+        id: string;
+        title: string;
+        lastMessageDate: number;
+        needsInput: boolean;
+        source: 'workspace' | 'empty-window';
+        workspaceId?: string;
+        workspaceDir?: string;
+        displayName?: string;
+        jsonPath: string;
+    };
+    messages: VscodeConversationMessage[];
+    updatedAt: number;
+}
+
+/**
+ * Read VS Code chat history for a specific Copilot conversation.
+ */
+export async function machineGetVscodeSessionHistory(
+    machineId: string,
+    instanceId: string,
+    sessionId: string,
+    limit: number = 200
+): Promise<VscodeConversationHistory> {
+    const result = await apiSocket.machineRPC<VscodeConversationHistory, {
+        instanceId: string;
+        sessionId: string;
+        limit?: number;
+    }>(
+        machineId,
+        'vscode-get-session-history',
+        { instanceId, sessionId, limit }
+    );
+    return result;
+}
+
+/**
  * Execute a bash command on a specific machine
  */
 export async function machineBash(

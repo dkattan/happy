@@ -76,7 +76,7 @@ export function startDaemonControlServer({
       }
     }, async (request) => {
       const meta = request.body;
-      vscodeBridge.register(meta);
+      await vscodeBridge.register(meta);
       logger.debug(`[CONTROL SERVER] VS Code registered: ${meta.instanceId}`);
       return { ok: true as const };
     });
@@ -84,13 +84,16 @@ export function startDaemonControlServer({
     typed.post('/vscode/heartbeat', {
       schema: {
         body: z.object({ instanceId: z.string() }),
-        response: { 200: z.object({ ok: z.literal(true) }) }
+        response: {
+          200: z.object({ ok: z.literal(true) }),
+          404: z.object({ ok: z.literal(false) })
+        }
       }
     }, async (request, reply) => {
       const ok = vscodeBridge.heartbeat(request.body.instanceId);
       if (!ok) {
         reply.code(404);
-        return { ok: false } as any;
+        return { ok: false as const };
       }
       return { ok: true as const };
     });
@@ -111,13 +114,48 @@ export function startDaemonControlServer({
             jsonPath: z.string()
           }))
         }),
-        response: { 200: z.object({ ok: z.literal(true) }) }
+        response: {
+          200: z.object({ ok: z.literal(true) }),
+          404: z.object({ ok: z.literal(false) })
+        }
       }
     }, async (request, reply) => {
-      const ok = vscodeBridge.updateSessions(request.body.instanceId, request.body.sessions);
+      const ok = await vscodeBridge.updateSessions(request.body.instanceId, request.body.sessions);
       if (!ok) {
         reply.code(404);
-        return { ok: false } as any;
+        return { ok: false as const };
+      }
+      return { ok: true as const };
+    });
+
+    typed.post('/vscode/live-history', {
+      schema: {
+        body: z.object({
+          instanceId: z.string(),
+          sessionId: z.string(),
+          updatedAt: z.number().optional(),
+          messages: z.array(z.object({
+            id: z.string(),
+            role: z.union([z.literal('user'), z.literal('assistant')]),
+            text: z.string(),
+            timestamp: z.number()
+          }))
+        }),
+        response: {
+          200: z.object({ ok: z.literal(true) }),
+          404: z.object({ ok: z.literal(false) })
+        }
+      }
+    }, async (request, reply) => {
+      const ok = vscodeBridge.updateLiveHistory(
+        request.body.instanceId,
+        request.body.sessionId,
+        request.body.messages,
+        request.body.updatedAt
+      );
+      if (!ok) {
+        reply.code(404);
+        return { ok: false as const };
       }
       return { ok: true as const };
     });
@@ -148,7 +186,8 @@ export function startDaemonControlServer({
       schema: {
         params: z.object({ instanceId: z.string() }),
         response: {
-          200: z.object({ sessions: z.array(z.any()) })
+          200: z.object({ sessions: z.array(z.any()) }),
+          404: z.object({ sessions: z.array(z.any()) })
         }
       }
     }, async (request, reply) => {
@@ -160,17 +199,59 @@ export function startDaemonControlServer({
       return { sessions };
     });
 
+    typed.get('/vscode/instances/:instanceId/sessions/:sessionId/history', {
+      schema: {
+        params: z.object({
+          instanceId: z.string(),
+          sessionId: z.string()
+        }),
+        querystring: z.object({
+          limit: z.coerce.number().int().positive().max(1000).optional()
+        }),
+        response: {
+          200: z.object({
+            history: z.any()
+          }),
+          404: z.object({
+            error: z.string()
+          })
+        }
+      }
+    }, async (request, reply) => {
+      if (!vscodeBridge.hasInstance(request.params.instanceId)) {
+        reply.code(404);
+        return { error: 'VS Code instance not found' };
+      }
+
+      try {
+        const history = vscodeBridge.getSessionHistory(
+          request.params.instanceId,
+          request.params.sessionId,
+          request.query.limit
+        );
+        return { history };
+      } catch (error) {
+        reply.code(404);
+        return {
+          error: error instanceof Error ? error.message : 'VS Code session not found'
+        };
+      }
+    });
+
     typed.post('/vscode/instances/:instanceId/send', {
       schema: {
         params: z.object({ instanceId: z.string() }),
         body: z.object({ sessionId: z.string(), message: z.string() }),
-        response: { 200: z.object({ queued: z.literal(true), commandId: z.string() }) }
+        response: {
+          200: z.object({ queued: z.literal(true), commandId: z.string() }),
+          404: z.object({ queued: z.literal(false) })
+        }
       }
     }, async (request, reply) => {
       const queued = vscodeBridge.queueSendMessage(request.params.instanceId, request.body.sessionId, request.body.message);
       if (!queued) {
         reply.code(404);
-        return { queued: false } as any;
+        return { queued: false as const };
       }
       return { queued: true as const, commandId: queued.commandId };
     });
@@ -178,7 +259,10 @@ export function startDaemonControlServer({
     typed.get('/vscode/instances/:instanceId/commands', {
       schema: {
         params: z.object({ instanceId: z.string() }),
-        response: { 200: z.object({ commands: z.array(z.any()) }) }
+        response: {
+          200: z.object({ commands: z.array(z.any()) }),
+          404: z.object({ commands: z.array(z.any()) })
+        }
       }
     }, async (request, reply) => {
       if (!vscodeBridge.hasInstance(request.params.instanceId)) {
@@ -193,13 +277,16 @@ export function startDaemonControlServer({
       schema: {
         params: z.object({ instanceId: z.string(), commandId: z.string() }),
         body: z.object({ ok: z.boolean() }),
-        response: { 200: z.object({ ok: z.literal(true) }) }
+        response: {
+          200: z.object({ ok: z.literal(true) }),
+          404: z.object({ ok: z.literal(false) })
+        }
       }
     }, async (request, reply) => {
       const ok = vscodeBridge.ackCommand(request.params.instanceId, request.params.commandId);
       if (!ok) {
         reply.code(404);
-        return { ok: false } as any;
+        return { ok: false as const };
       }
       return { ok: true as const };
     });

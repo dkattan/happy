@@ -7,6 +7,7 @@ import { createInterface } from 'node:readline';
 import { stopDaemon, checkIfDaemonRunningAndCleanupStaleState } from '@/daemon/controlClient';
 import { logger } from '@/ui/logger';
 import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 
 export async function handleAuthCommand(args: string[]): Promise<void> {
   const subcommand = args[0];
@@ -38,13 +39,17 @@ function showAuthHelp(): void {
 ${chalk.bold('happy auth')} - Authentication management
 
 ${chalk.bold('Usage:')}
-  happy auth login [--force]    Authenticate with Happy
+  happy auth login [--force] [--mobile|--web] [--open-ios-simulator]
+                               Authenticate with Happy
   happy auth logout             Remove authentication and machine data
   happy auth status             Show authentication status
   happy auth help               Show this help message
 
 ${chalk.bold('Options:')}
-  --force    Clear credentials, machine ID, and stop daemon before re-auth
+  --force                Clear credentials, machine ID, and stop daemon before re-auth
+  --mobile               Use mobile-app QR/deep-link auth flow
+  --web                  Use browser-based auth flow
+  --open-ios-simulator   Open auth link directly in booted iOS Simulator (macOS only; implies --mobile)
 
 ${chalk.gray('PS: Your master secret never leaves your mobile/web device. Each CLI machine')}
 ${chalk.gray('receives only a derived key for per-machine encryption, so backup codes')}
@@ -54,6 +59,27 @@ ${chalk.gray('cannot be displayed from the CLI.')}
 
 async function handleAuthLogin(args: string[]): Promise<void> {
   const forceAuth = args.includes('--force') || args.includes('-f');
+  const useMobileAuth = args.includes('--mobile');
+  const useWebAuth = args.includes('--web');
+  const openIosSimulator = args.includes('--open-ios-simulator');
+
+  if (useMobileAuth && useWebAuth) {
+    console.error(chalk.red('Error: --mobile and --web cannot be used together.'));
+    process.exit(1);
+  }
+
+  if (openIosSimulator && process.platform !== 'darwin') {
+    console.error(chalk.red('Error: --open-ios-simulator is only supported on macOS.'));
+    process.exit(1);
+  }
+
+  const authMethod = openIosSimulator
+    ? 'mobile'
+    : useMobileAuth
+      ? 'mobile'
+      : useWebAuth
+        ? 'web'
+        : undefined;
 
   if (forceAuth) {
     // As per user's request: "--force-auth will clear credentials, clear machine ID, stop daemon"
@@ -105,13 +131,41 @@ async function handleAuthLogin(args: string[]): Promise<void> {
   // Perform authentication and machine setup
   // "Finally we'll run the auth and setup machine if needed"
   try {
-    const result = await authAndSetupMachineIfNeeded();
+    const result = await authAndSetupMachineIfNeeded({
+      authMethod,
+      onMobileAuthUrl: openIosSimulator
+        ? (authUrl) => {
+          const simulatorAuthUrl = `${authUrl}&autoconnect=1`;
+          openAuthUrlInBootedIOSSimulator(simulatorAuthUrl);
+        }
+        : undefined
+    });
     console.log(chalk.green('\n✓ Authentication successful'));
     console.log(chalk.gray(`  Machine ID: ${result.machineId}`));
   } catch (error) {
     console.error(chalk.red('Authentication failed:'), error instanceof Error ? error.message : 'Unknown error');
     process.exit(1);
   }
+}
+
+function openAuthUrlInBootedIOSSimulator(authUrl: string): void {
+  spawnSync('open', ['-a', 'Simulator'], { stdio: 'ignore' });
+
+  const openResult = spawnSync(
+    'xcrun',
+    ['simctl', 'openurl', 'booted', authUrl],
+    { encoding: 'utf8' }
+  );
+
+  if (openResult.status === 0) {
+    console.log(chalk.green('✓ Opened auth link in iOS Simulator'));
+    return;
+  }
+
+  const message = openResult.stderr?.trim() || openResult.stdout?.trim() || 'Unknown error';
+  console.log(chalk.yellow('⚠️  Could not open auth link in booted simulator.'));
+  console.log(chalk.gray(`  ${message}`));
+  console.log(chalk.gray('  Boot a simulator, then re-run this command or paste the URL manually.'));
 }
 
 async function handleAuthLogout(): Promise<void> {

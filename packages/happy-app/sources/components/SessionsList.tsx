@@ -3,9 +3,9 @@ import { View, Pressable, FlatList, Platform } from 'react-native';
 import { Swipeable } from 'react-native-gesture-handler';
 import { Text } from '@/components/StyledText';
 import { usePathname } from 'expo-router';
-import { SessionListViewItem } from '@/sync/storage';
+import { SessionListViewItem, CopilotConversationListItem } from '@/sync/storage';
 import { Ionicons } from '@expo/vector-icons';
-import { getSessionName, useSessionStatus, getSessionSubtitle, getSessionAvatarId } from '@/utils/sessionUtils';
+import { getSessionName, useSessionStatus, getSessionSubtitle, getSessionAvatarId, formatLastSeen } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
 import { ActiveSessionsGroup } from './ActiveSessionsGroup';
 import { ActiveSessionsGroupCompact } from './ActiveSessionsGroupCompact';
@@ -192,7 +192,133 @@ const stylesheet = StyleSheet.create((theme) => ({
         textAlign: 'center',
         ...Typography.default('semiBold'),
     },
+    copilotCard: {
+        marginHorizontal: 16,
+        marginBottom: 12,
+        borderRadius: 12,
+        overflow: 'hidden',
+        backgroundColor: theme.colors.surface,
+    },
+    copilotRow: {
+        minHeight: 84,
+        paddingHorizontal: 16,
+        paddingVertical: 14,
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: theme.colors.surface,
+    },
+    copilotRowBorder: {
+        borderBottomWidth: StyleSheet.hairlineWidth,
+        borderBottomColor: theme.colors.divider,
+    },
+    copilotIconContainer: {
+        width: 40,
+        height: 40,
+        borderRadius: 20,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: theme.colors.surfaceHighest,
+        marginRight: 12,
+    },
+    copilotContent: {
+        flex: 1,
+    },
+    copilotTitleRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+    },
+    copilotTitle: {
+        flex: 1,
+        fontSize: 15,
+        color: theme.colors.text,
+        ...Typography.default('semiBold'),
+    },
+    copilotSubtitle: {
+        marginTop: 2,
+        fontSize: 13,
+        color: theme.colors.textSecondary,
+        ...Typography.default(),
+    },
+    copilotStatusRow: {
+        marginTop: 6,
+        flexDirection: 'row',
+        alignItems: 'center',
+    },
+    copilotStatusText: {
+        marginLeft: 4,
+        fontSize: 12,
+        ...Typography.default(),
+    },
+    copilotInstanceHeader: {
+        paddingHorizontal: 16,
+        paddingTop: 12,
+        paddingBottom: 10,
+        backgroundColor: theme.colors.surfaceHighest,
+    },
+    copilotInstanceHeaderFirst: {
+        borderTopLeftRadius: 12,
+        borderTopRightRadius: 12,
+    },
+    copilotInstanceTitle: {
+        fontSize: 13,
+        color: theme.colors.text,
+        ...Typography.default('semiBold'),
+    },
+    copilotInstanceSubtitle: {
+        marginTop: 2,
+        fontSize: 12,
+        color: theme.colors.textSecondary,
+        ...Typography.default(),
+    },
+    copilotInstanceSeparator: {
+        height: StyleSheet.hairlineWidth,
+        backgroundColor: theme.colors.divider,
+    },
 }));
+
+function getPathTail(pathLike: string | null | undefined): string {
+    if (!pathLike || typeof pathLike !== 'string') {
+        return '';
+    }
+    const parts = pathLike.split(/[\\/]/).filter(Boolean);
+    return parts[parts.length - 1] ?? pathLike;
+}
+
+function getEditorFamily(appName: string | null | undefined): { key: 'vscode' | 'insiders' | 'other'; label: string } {
+    if (!appName || typeof appName !== 'string') {
+        return { key: 'vscode', label: 'VS Code' };
+    }
+    const normalized = appName.toLowerCase();
+    if (normalized.includes('insider')) {
+        return { key: 'insiders', label: 'VS Code Insiders' };
+    }
+    if (normalized.includes('visual studio code') || normalized.includes('vscode')) {
+        return { key: 'vscode', label: 'VS Code' };
+    }
+    return { key: 'other', label: appName };
+}
+
+function getInstanceLabel(conversation: CopilotConversationListItem): string {
+    const instance = conversation.instance;
+    if (!instance) {
+        return `Window ${conversation.session.instanceId.slice(0, 8)}`;
+    }
+
+    const workspaceFileName = getPathTail(instance.workspaceFile);
+    if (workspaceFileName) {
+        return workspaceFileName;
+    }
+
+    if (Array.isArray(instance.workspaceFolders) && instance.workspaceFolders.length > 0) {
+        const first = getPathTail(instance.workspaceFolders[0]);
+        if (instance.workspaceFolders.length === 1) {
+            return first || t('machine.vscodeWorkspace');
+        }
+        return `${first || t('machine.vscodeWorkspace')} +${instance.workspaceFolders.length - 1}`;
+    }
+
+    return `${instance.appName} (${instance.platform})`;
+}
 
 export function SessionsList() {
     const styles = stylesheet;
@@ -230,6 +356,7 @@ export function SessionsList() {
         switch (item.type) {
             case 'header': return `header-${item.title}-${index}`;
             case 'active-sessions': return 'active-sessions';
+            case 'copilot-sessions': return 'copilot-sessions';
             case 'project-group': return `project-group-${item.machine.id}-${item.displayPath}-${index}`;
             case 'session': return `session-${item.session.id}`;
         }
@@ -292,8 +419,18 @@ export function SessionsList() {
                         isSingle={isSingle}
                     />
                 );
+
+            case 'copilot-sessions':
+                return (
+                    <CopilotSessionsGroup
+                        conversations={item.conversations}
+                        onPressConversation={(conversation) => router.push(
+                            `/copilot/${encodeURIComponent(conversation.machine.id)}/${encodeURIComponent(conversation.session.instanceId)}/${encodeURIComponent(conversation.session.id)}` as any
+                        )}
+                    />
+                );
         }
-    }, [pathname, dataWithSelected, compactSessionView]);
+    }, [pathname, dataWithSelected, compactSessionView, router]);
 
 
     // Remove this section as we'll use FlatList for all items now
@@ -468,6 +605,196 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
             >
                 {itemContent}
             </Swipeable>
+        </View>
+    );
+});
+
+const CopilotSessionsGroup = React.memo(({ conversations, onPressConversation }: {
+    conversations: CopilotConversationListItem[];
+    onPressConversation: (conversation: CopilotConversationListItem) => void;
+}) => {
+    const styles = stylesheet;
+    const groupedConversationsByApp = React.useMemo(() => {
+        const appGroups = new Map<string, {
+            key: 'vscode' | 'insiders' | 'other';
+            label: string;
+            appLastSeen: number;
+            instances: Map<string, {
+                key: string;
+                machineName: string;
+                instanceLabel: string;
+                instanceLastSeen: number;
+                conversations: CopilotConversationListItem[];
+            }>;
+        }>();
+
+        conversations.forEach((conversation) => {
+            const appFamily = getEditorFamily(conversation.instance?.appName);
+            const machineName = conversation.machine.metadata?.displayName
+                || conversation.machine.metadata?.host
+                || conversation.machine.id;
+            const instanceLabel = getInstanceLabel(conversation);
+            const instanceLastSeen = conversation.instance?.lastSeen ?? conversation.session.lastMessageDate ?? 0;
+            const instanceKey = `${conversation.machine.id}:${conversation.session.instanceId}`;
+            const existingAppGroup = appGroups.get(appFamily.key);
+            const appGroup = existingAppGroup ?? {
+                key: appFamily.key,
+                label: appFamily.label,
+                appLastSeen: 0,
+                instances: new Map<string, {
+                    key: string;
+                    machineName: string;
+                    instanceLabel: string;
+                    instanceLastSeen: number;
+                    conversations: CopilotConversationListItem[];
+                }>()
+            };
+
+            appGroup.appLastSeen = Math.max(appGroup.appLastSeen, instanceLastSeen);
+
+            const existing = appGroup.instances.get(instanceKey);
+            if (existing) {
+                existing.conversations.push(conversation);
+                if (instanceLastSeen > existing.instanceLastSeen) {
+                    existing.instanceLastSeen = instanceLastSeen;
+                }
+                appGroups.set(appFamily.key, appGroup);
+                return;
+            }
+
+            appGroup.instances.set(instanceKey, {
+                key: instanceKey,
+                machineName,
+                instanceLabel,
+                instanceLastSeen,
+                conversations: [conversation],
+            });
+            appGroups.set(appFamily.key, appGroup);
+        });
+
+        const appOrder: Record<string, number> = {
+            vscode: 0,
+            insiders: 1,
+            other: 2,
+        };
+
+        const normalized = Array.from(appGroups.values()).map((appGroup) => {
+            const instances = Array.from(appGroup.instances.values());
+            instances.sort((a, b) => b.instanceLastSeen - a.instanceLastSeen);
+            instances.forEach((group) => {
+                const seenConversations = new Set<string>();
+                group.conversations = group.conversations.filter((conversation) => {
+                    const dedupeKey = `${conversation.machine.id}:${conversation.session.instanceId}:${conversation.session.id}:${conversation.session.jsonPath}`;
+                    if (seenConversations.has(dedupeKey)) {
+                        return false;
+                    }
+                    seenConversations.add(dedupeKey);
+                    return true;
+                });
+                group.conversations.sort((a, b) => {
+                    if (a.session.needsInput !== b.session.needsInput) {
+                        return Number(b.session.needsInput) - Number(a.session.needsInput);
+                    }
+                    return (b.session.lastMessageDate ?? 0) - (a.session.lastMessageDate ?? 0);
+                });
+            });
+            return {
+                key: appGroup.key,
+                label: appGroup.label,
+                appLastSeen: appGroup.appLastSeen,
+                instances,
+            };
+        });
+
+        normalized.sort((a, b) => {
+            const orderDelta = (appOrder[a.key] ?? 999) - (appOrder[b.key] ?? 999);
+            if (orderDelta !== 0) {
+                return orderDelta;
+            }
+            return b.appLastSeen - a.appLastSeen;
+        });
+
+        return normalized;
+    }, [conversations]);
+
+    return (
+        <View>
+            {groupedConversationsByApp.map((appGroup) => (
+                <View key={appGroup.key}>
+                    <View style={styles.headerSection}>
+                        <Text style={styles.headerText}>
+                            {appGroup.label}
+                        </Text>
+                    </View>
+                    <View style={styles.copilotCard}>
+                        {appGroup.instances.map((group, groupIndex) => (
+                            <View key={`${appGroup.key}:${group.key}`}>
+                                <View
+                                    style={[
+                                        styles.copilotInstanceHeader,
+                                        groupIndex === 0 && styles.copilotInstanceHeaderFirst
+                                    ]}
+                                >
+                                    <Text style={styles.copilotInstanceTitle} numberOfLines={1}>
+                                        {group.machineName} • {group.instanceLabel}
+                                    </Text>
+                                    <Text style={styles.copilotInstanceSubtitle} numberOfLines={1}>
+                                        {t('status.lastSeen', { time: formatLastSeen(group.instanceLastSeen, false) })}
+                                    </Text>
+                                </View>
+                                {group.conversations.map((conversation, index) => {
+                                    const location = conversation.session.displayName
+                                        || (conversation.session.source === 'empty-window' ? t('machine.vscodeEmptyWindow') : t('machine.vscodeWorkspace'));
+                                    const statusText = conversation.session.needsInput
+                                        ? t('machine.vscodeNeedsInput')
+                                        : t('status.lastSeen', { time: formatLastSeen(conversation.session.lastMessageDate ?? 0, false) });
+                                    const statusColor = conversation.session.needsInput ? '#FF3B30' : '#999999';
+                                    const isLastInGroup = index === group.conversations.length - 1;
+                                    const isLastGroup = groupIndex === appGroup.instances.length - 1;
+
+                                    return (
+                                        <Pressable
+                                            key={`${conversation.machine.id}:${conversation.session.instanceId}:${conversation.session.id}:${conversation.session.jsonPath}`}
+                                            style={[
+                                                styles.copilotRow,
+                                                (!isLastInGroup || !isLastGroup) && styles.copilotRowBorder
+                                            ]}
+                                            onPress={() => onPressConversation(conversation)}
+                                        >
+                                            <View style={styles.copilotIconContainer}>
+                                                <Ionicons
+                                                    name={conversation.session.needsInput ? 'alert-circle' : 'logo-github'}
+                                                    size={18}
+                                                    color={conversation.session.needsInput ? '#FF3B30' : '#4A5568'}
+                                                />
+                                            </View>
+                                            <View style={styles.copilotContent}>
+                                                <View style={styles.copilotTitleRow}>
+                                                    <Text style={styles.copilotTitle} numberOfLines={1}>
+                                                        {conversation.session.title}
+                                                    </Text>
+                                                </View>
+                                                <Text style={styles.copilotSubtitle} numberOfLines={1}>
+                                                    {location}
+                                                </Text>
+                                                <View style={styles.copilotStatusRow}>
+                                                    <StatusDot color={statusColor} isPulsing={conversation.session.needsInput} />
+                                                    <Text style={[styles.copilotStatusText, { color: statusColor }]} numberOfLines={1}>
+                                                        {statusText}
+                                                    </Text>
+                                                </View>
+                                            </View>
+                                        </Pressable>
+                                    );
+                                })}
+                                {groupIndex < appGroup.instances.length - 1 && (
+                                    <View style={styles.copilotInstanceSeparator} />
+                                )}
+                            </View>
+                        ))}
+                    </View>
+                </View>
+            ))}
         </View>
     );
 });

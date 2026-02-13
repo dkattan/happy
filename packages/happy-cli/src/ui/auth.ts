@@ -14,11 +14,16 @@ import React from 'react';
 import { randomUUID } from 'node:crypto';
 import { logger } from './logger';
 
-export async function doAuth(): Promise<Credentials | null> {
+interface DoAuthOptions {
+    preferredMethod?: AuthMethod;
+    onMobileAuthUrl?: (authUrl: string) => void;
+}
+
+export async function doAuth(options?: DoAuthOptions): Promise<Credentials | null> {
     console.clear();
 
     // Show authentication method selector
-    const authMethod = await selectAuthenticationMethod();
+    const authMethod = options?.preferredMethod ?? await selectAuthenticationMethod();
     if (!authMethod) {
         console.log('\nAuthentication cancelled.\n');
         process.exit(0);
@@ -51,7 +56,7 @@ export async function doAuth(): Promise<Credentials | null> {
 
     // Handle authentication based on selected method
     if (authMethod === 'mobile') {
-        return await doMobileAuth(keypair);
+        return await doMobileAuth(keypair, options?.onMobileAuthUrl);
     } else {
         return await doWebAuth(keypair);
     }
@@ -90,12 +95,16 @@ function selectAuthenticationMethod(): Promise<AuthMethod | null> {
 /**
  * Handle mobile authentication flow
  */
-async function doMobileAuth(keypair: tweetnacl.BoxKeyPair): Promise<Credentials | null> {
+async function doMobileAuth(
+    keypair: tweetnacl.BoxKeyPair,
+    onAuthUrl?: (authUrl: string) => void
+): Promise<Credentials | null> {
     console.clear();
     console.log('\nMobile Authentication\n');
     console.log('Scan this QR code with your Happy mobile app:\n');
 
     const authUrl = 'happy://terminal?' + encodeBase64Url(keypair.publicKey);
+    onAuthUrl?.(authUrl);
     displayQRCode(authUrl);
 
     console.log('\nOr manually enter this URL:');
@@ -242,7 +251,12 @@ export function decryptWithEphemeralKey(encryptedBundle: Uint8Array, recipientSe
  * Ensure authentication and machine setup
  * This replaces the onboarding flow and ensures everything is ready
  */
-export async function authAndSetupMachineIfNeeded(): Promise<{
+interface AuthSetupOptions {
+    authMethod?: AuthMethod;
+    onMobileAuthUrl?: (authUrl: string) => void;
+}
+
+export async function authAndSetupMachineIfNeeded(options?: AuthSetupOptions): Promise<{
     credentials: Credentials;
     machineId: string;
 }> {
@@ -254,7 +268,10 @@ export async function authAndSetupMachineIfNeeded(): Promise<{
 
     if (!credentials) {
         logger.debug('[AUTH] No credentials found, starting authentication flow...');
-        const authResult = await doAuth();
+        const authResult = await doAuth({
+            preferredMethod: options?.authMethod,
+            onMobileAuthUrl: options?.onMobileAuthUrl
+        });
         if (!authResult) {
             throw new Error('Authentication failed or was cancelled');
         }

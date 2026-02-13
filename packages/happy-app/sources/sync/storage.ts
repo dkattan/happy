@@ -60,7 +60,54 @@ export type SessionListViewItem =
     | { type: 'header'; title: string }
     | { type: 'active-sessions'; sessions: Session[] }
     | { type: 'project-group'; displayPath: string; machine: Machine }
-    | { type: 'session'; session: Session; variant?: 'default' | 'no-path' };
+    | { type: 'session'; session: Session; variant?: 'default' | 'no-path' }
+    | { type: 'copilot-sessions'; conversations: CopilotConversationListItem[] };
+
+interface VscodeBridgeSessionSummary {
+    instanceId: string;
+    id: string;
+    title: string;
+    lastMessageDate: number;
+    needsInput: boolean;
+    source: 'workspace' | 'empty-window';
+    workspaceId?: string;
+    workspaceDir?: string;
+    displayName?: string;
+    jsonPath: string;
+}
+
+interface VscodeBridgeInstanceSummary {
+    instanceId: string;
+    appName: string;
+    appVersion: string;
+    platform: string;
+    pid: number;
+    workspaceFolders: string[];
+    workspaceFile?: string | null;
+    lastSeen: number;
+}
+
+export interface CopilotConversationListItem {
+    machine: Machine;
+    instance: VscodeBridgeInstanceSummary | null;
+    session: VscodeBridgeSessionSummary;
+}
+
+function isContextScopedInstance(instance: VscodeBridgeInstanceSummary | null): boolean {
+    if (!instance) return false;
+    return Boolean(instance.workspaceFile) || (Array.isArray(instance.workspaceFolders) && instance.workspaceFolders.length > 0);
+}
+
+function scoreConversationOwnership(
+    session: VscodeBridgeSessionSummary,
+    instance: VscodeBridgeInstanceSummary | null
+): number {
+    const scoped = isContextScopedInstance(instance);
+    if (session.source === 'workspace') {
+        return scoped ? 2 : 1;
+    }
+    return scoped ? 0 : 2;
+}
 
 // Legacy type for backward compatibility - to be removed
 export type SessionListItem = string | Session;
@@ -149,7 +196,8 @@ interface StorageState {
 
 // Helper function to build unified list view data from sessions and machines
 function buildSessionListViewData(
-    sessions: Record<string, Session>
+    sessions: Record<string, Session>,
+    machines: Record<string, Machine>
 ): SessionListViewItem[] {
     // Separate active and inactive sessions
     const activeSessions: Session[] = [];
@@ -170,9 +218,73 @@ function buildSessionListViewData(
     // Build unified list view data
     const listData: SessionListViewItem[] = [];
 
+    const copilotConversationsByKey = new Map<string, CopilotConversationListItem>();
+    Object.values(machines).forEach((machine) => {
+        const vscodeState = (machine.daemonState as {
+            vscode?: {
+                instances?: VscodeBridgeInstanceSummary[];
+                sessions?: VscodeBridgeSessionSummary[];
+            };
+        } | null)?.vscode;
+        const vscodeSessions = vscodeState?.sessions ?? [];
+        const vscodeInstances = vscodeState?.instances ?? [];
+        const instancesById = new Map<string, VscodeBridgeInstanceSummary>();
+
+        vscodeInstances.forEach((instance) => {
+            instancesById.set(instance.instanceId, instance);
+        });
+
+        if (!Array.isArray(vscodeSessions)) {
+            return;
+        }
+
+        vscodeSessions.forEach((vscodeSession) => {
+            const dedupeKey = `${machine.id}:${vscodeSession.id}:${vscodeSession.jsonPath}`;
+            const next: CopilotConversationListItem = {
+                machine,
+                instance: instancesById.get(vscodeSession.instanceId) ?? null,
+                session: vscodeSession,
+            };
+
+            const existing = copilotConversationsByKey.get(dedupeKey);
+            if (!existing) {
+                copilotConversationsByKey.set(dedupeKey, next);
+                return;
+            }
+
+            const existingScore = scoreConversationOwnership(existing.session, existing.instance);
+            const nextScore = scoreConversationOwnership(next.session, next.instance);
+            if (nextScore > existingScore) {
+                copilotConversationsByKey.set(dedupeKey, next);
+                return;
+            }
+            if (nextScore < existingScore) {
+                return;
+            }
+
+            // Stable tiebreaker prevents UI flapping between equivalent instances.
+            if (next.session.instanceId.localeCompare(existing.session.instanceId) < 0) {
+                copilotConversationsByKey.set(dedupeKey, next);
+            }
+        });
+    });
+
+    const copilotConversations = Array.from(copilotConversationsByKey.values());
+
+    copilotConversations.sort((a, b) => {
+        if (a.session.needsInput !== b.session.needsInput) {
+            return Number(b.session.needsInput) - Number(a.session.needsInput);
+        }
+        return (b.session.lastMessageDate ?? 0) - (a.session.lastMessageDate ?? 0);
+    });
+
     // Add active sessions as a single item at the top (if any)
     if (activeSessions.length > 0) {
         listData.push({ type: 'active-sessions', sessions: activeSessions });
+    }
+
+    if (copilotConversations.length > 0) {
+        listData.push({ type: 'copilot-sessions', conversations: copilotConversations });
     }
 
     // Group inactive sessions by date
@@ -443,7 +555,8 @@ export const storage = create<StorageState>()((set, get) => {
 
             // Build new unified list view data
             const sessionListViewData = buildSessionListViewData(
-                mergedSessions
+                mergedSessions,
+                state.machines
             );
 
             // Update project manager with current sessions and machines
@@ -769,7 +882,8 @@ export const storage = create<StorageState>()((set, get) => {
 
             // Rebuild sessionListViewData to update the UI immediately
             const sessionListViewData = buildSessionListViewData(
-                updatedSessions
+                updatedSessions,
+                state.machines
             );
 
             return {
@@ -860,7 +974,8 @@ export const storage = create<StorageState>()((set, get) => {
 
             // Rebuild sessionListViewData to reflect machine changes
             const sessionListViewData = buildSessionListViewData(
-                state.sessions
+                state.sessions,
+                mergedMachines
             );
 
             return {
@@ -933,7 +1048,7 @@ export const storage = create<StorageState>()((set, get) => {
             saveSessionPermissionModes(modes);
             
             // Rebuild sessionListViewData without the deleted session
-            const sessionListViewData = buildSessionListViewData(remainingSessions);
+            const sessionListViewData = buildSessionListViewData(remainingSessions, state.machines);
             
             return {
                 ...state,

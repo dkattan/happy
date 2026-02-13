@@ -13,7 +13,7 @@ import { t } from '@/text';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { useHeaderHeight } from '@/utils/responsive';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { machineSpawnNewSession } from '@/sync/ops';
+import { machineOpenVscodeSession, machineSendVscodeMessage, machineSpawnNewSession } from '@/sync/ops';
 import { Modal } from '@/modal';
 import { sync } from '@/sync/sync';
 import { SessionTypeSelector } from '@/components/SessionTypeSelector';
@@ -49,6 +49,21 @@ export const callbacks = {
     }
 }
 
+type NewSessionAgentType = 'claude' | 'codex' | 'copilot';
+
+type VscodeSessionSummary = {
+    instanceId: string;
+    id: string;
+    title: string;
+    lastMessageDate: number;
+    needsInput: boolean;
+    source: 'workspace' | 'empty-window';
+    workspaceId?: string;
+    workspaceDir?: string;
+    displayName?: string;
+    jsonPath: string;
+};
+
 // Optimized profile lookup utility
 const useProfileMap = (profiles: AIBackendProfile[]) => {
     return React.useMemo(() =>
@@ -59,7 +74,7 @@ const useProfileMap = (profiles: AIBackendProfile[]) => {
 
 // Environment variable transformation helper
 // Returns ALL profile environment variables - daemon will use them as-is
-const transformProfileToEnvironmentVars = (profile: AIBackendProfile, agentType: 'claude' | 'codex' | 'gemini' = 'claude') => {
+const transformProfileToEnvironmentVars = (profile: AIBackendProfile) => {
     // getProfileEnvironmentVariables already returns ALL env vars from profile
     // including custom environmentVariables array and provider-specific configs
     return getProfileEnvironmentVariables(profile);
@@ -310,35 +325,37 @@ function NewSessionWizard() {
         }
         return 'anthropic'; // Default to Anthropic
     });
-    const [agentType, setAgentType] = React.useState<'claude' | 'codex' | 'gemini'>(() => {
+    const [agentType, setAgentType] = React.useState<NewSessionAgentType>(() => {
         // Check if agent type was provided in temp data
         if (tempSessionData?.agentType) {
-            // Only allow gemini if experiments are enabled
-            if (tempSessionData.agentType === 'gemini' && !experimentsEnabled) {
-                return 'claude';
+            if (tempSessionData.agentType === 'claude' || tempSessionData.agentType === 'codex' || tempSessionData.agentType === 'copilot') {
+                return tempSessionData.agentType;
             }
-            return tempSessionData.agentType;
+            if (tempSessionData.agentType === 'gemini') {
+                // Migration path from old drafts where gemini occupied the 3rd slot.
+                return 'copilot';
+            }
         }
-        if (lastUsedAgent === 'claude' || lastUsedAgent === 'codex') {
+        if (lastUsedAgent === 'claude' || lastUsedAgent === 'codex' || lastUsedAgent === 'copilot') {
             return lastUsedAgent;
         }
-        // Only allow gemini if experiments are enabled
-        if (lastUsedAgent === 'gemini' && experimentsEnabled) {
-            return lastUsedAgent;
+        if (lastUsedAgent === 'gemini') {
+            // Migration path from old settings where gemini occupied the 3rd slot.
+            return 'copilot';
         }
         return 'claude';
     });
 
-    // Agent cycling handler (for cycling through claude -> codex -> gemini)
+    // Agent cycling handler (for cycling through claude -> codex -> copilot)
     // Note: Does NOT persist immediately - persistence is handled by useEffect below
     const handleAgentClick = React.useCallback(() => {
         setAgentType(prev => {
-            // Cycle: claude -> codex -> gemini (if experiments) -> claude
+            // Cycle: claude -> codex -> copilot -> claude
             if (prev === 'claude') return 'codex';
-            if (prev === 'codex') return experimentsEnabled ? 'gemini' : 'claude';
+            if (prev === 'codex') return 'copilot';
             return 'claude';
         });
-    }, [experimentsEnabled]);
+    }, []);
 
     // Persist agent selection changes (separate from setState to avoid race condition)
     // This runs after agentType state is updated, ensuring the value is stable
@@ -350,10 +367,10 @@ function NewSessionWizard() {
     const [permissionMode, setPermissionMode] = React.useState<PermissionMode>(() => {
         // Initialize with last used permission mode if valid, otherwise default to 'default'
         const validClaudeModes: PermissionMode[] = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
-        const validCodexGeminiModes: PermissionMode[] = ['default', 'read-only', 'safe-yolo', 'yolo'];
+        const validCodexCopilotModes: PermissionMode[] = ['default', 'read-only', 'safe-yolo', 'yolo'];
 
         if (lastUsedPermissionMode) {
-            if ((agentType === 'codex' || agentType === 'gemini') && validCodexGeminiModes.includes(lastUsedPermissionMode as PermissionMode)) {
+            if ((agentType === 'codex' || agentType === 'copilot') && validCodexCopilotModes.includes(lastUsedPermissionMode as PermissionMode)) {
                 return lastUsedPermissionMode as PermissionMode;
             } else if (agentType === 'claude' && validClaudeModes.includes(lastUsedPermissionMode as PermissionMode)) {
                 return lastUsedPermissionMode as PermissionMode;
@@ -369,19 +386,15 @@ function NewSessionWizard() {
     const [modelMode, setModelMode] = React.useState<ModelMode>(() => {
         const validClaudeModes: ModelMode[] = ['default', 'adaptiveUsage', 'sonnet', 'opus'];
         const validCodexModes: ModelMode[] = ['gpt-5-codex-high', 'gpt-5-codex-medium', 'gpt-5-codex-low', 'gpt-5-minimal', 'gpt-5-low', 'gpt-5-medium', 'gpt-5-high'];
-        // Note: 'default' is NOT valid for Gemini - we want explicit model selection
-        const validGeminiModes: ModelMode[] = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
 
         if (lastUsedModelMode) {
             if (agentType === 'codex' && validCodexModes.includes(lastUsedModelMode as ModelMode)) {
                 return lastUsedModelMode as ModelMode;
             } else if (agentType === 'claude' && validClaudeModes.includes(lastUsedModelMode as ModelMode)) {
                 return lastUsedModelMode as ModelMode;
-            } else if (agentType === 'gemini' && validGeminiModes.includes(lastUsedModelMode as ModelMode)) {
-                return lastUsedModelMode as ModelMode;
             }
         }
-        return agentType === 'codex' ? 'gpt-5-codex-high' : agentType === 'gemini' ? 'gemini-2.5-pro' : 'default';
+        return agentType === 'codex' ? 'gpt-5-codex-high' : 'default';
     });
 
     // Session details state
@@ -416,6 +429,7 @@ function NewSessionWizard() {
         return tempSessionData?.prompt || prompt || persistedDraft?.input || '';
     });
     const [isCreating, setIsCreating] = React.useState(false);
+    const [isOpeningVscode, setIsOpeningVscode] = React.useState(false);
     const [showAdvanced, setShowAdvanced] = React.useState(false);
 
     // Handle machineId route param from picker screens (main's navigation pattern)
@@ -453,30 +467,54 @@ function NewSessionWizard() {
     const pathSectionRef = React.useRef<View>(null);
     const permissionSectionRef = React.useRef<View>(null);
 
+    const selectedMachine = React.useMemo(() => {
+        if (!selectedMachineId) return null;
+        return machines.find(m => m.id === selectedMachineId);
+    }, [selectedMachineId, machines]);
+
+    const vscodeSessions = React.useMemo(() => {
+        const snapshot = (selectedMachine?.daemonState as any)?.vscode as { sessions?: VscodeSessionSummary[] } | undefined;
+        return snapshot?.sessions ?? [];
+    }, [selectedMachine]);
+
+    const preferredVscodeSession = React.useMemo(() => {
+        if (vscodeSessions.length === 0) return null;
+
+        return [...vscodeSessions].sort((a, b) => {
+            if (a.needsInput !== b.needsInput) {
+                return Number(b.needsInput) - Number(a.needsInput);
+            }
+            return (b.lastMessageDate ?? 0) - (a.lastMessageDate ?? 0);
+        })[0];
+    }, [vscodeSessions]);
+
+    const copilotAvailable = vscodeSessions.length > 0;
+
     // CLI Detection - automatic, non-blocking detection of installed CLIs on selected machine
     const cliAvailability = useCLIDetection(selectedMachineId);
 
-    // Auto-correct invalid agent selection after CLI detection completes
-    // This handles the case where lastUsedAgent was 'codex' but codex is not installed
+    // Auto-correct invalid agent selection after capability detection completes.
     React.useEffect(() => {
         // Only act when detection has completed (timestamp > 0)
         if (cliAvailability.timestamp === 0) return;
 
         // Check if currently selected agent is available
-        const agentAvailable = cliAvailability[agentType];
+        const agentAvailable = agentType === 'copilot'
+            ? copilotAvailable
+            : cliAvailability[agentType];
 
         if (agentAvailable === false) {
             // Current agent not available - find first available
-            const availableAgent: 'claude' | 'codex' | 'gemini' =
+            const availableAgent: NewSessionAgentType =
                 cliAvailability.claude === true ? 'claude' :
                 cliAvailability.codex === true ? 'codex' :
-                (cliAvailability.gemini === true && experimentsEnabled) ? 'gemini' :
+                copilotAvailable ? 'copilot' :
                 'claude'; // Fallback to claude (will fail at spawn with clear error)
 
             console.warn(`[AgentSelection] ${agentType} not available, switching to ${availableAgent}`);
             setAgentType(availableAgent);
         }
-    }, [cliAvailability.timestamp, cliAvailability.claude, cliAvailability.codex, cliAvailability.gemini, agentType, experimentsEnabled]);
+    }, [cliAvailability.timestamp, cliAvailability.claude, cliAvailability.codex, agentType, copilotAvailable]);
 
     // Extract all ${VAR} references from profiles to query daemon environment
     const envVarRefs = React.useMemo(() => {
@@ -536,12 +574,14 @@ function NewSessionWizard() {
 
     // Helper to check if profile is available (compatible + CLI detected)
     const isProfileAvailable = React.useCallback((profile: AIBackendProfile): { available: boolean; reason?: string } => {
+        const profileAgent = agentType === 'copilot' ? 'codex' : agentType;
+
         // Check profile compatibility with selected agent type
-        if (!validateProfileForAgent(profile, agentType)) {
+        if (!validateProfileForAgent(profile, profileAgent)) {
             // Build list of agents this profile supports (excluding current)
             // Uses Object.entries to iterate over compatibility flags - scales automatically with new agents
             const supportedAgents = (Object.entries(profile.compatibility) as [string, boolean][])
-                .filter(([agent, supported]) => supported && agent !== agentType)
+                .filter(([agent, supported]) => supported && agent !== profileAgent)
                 .map(([agent]) => agent.charAt(0).toUpperCase() + agent.slice(1)); // 'claude' -> 'Claude'
             const required = supportedAgents.join(' or ') || 'another agent';
             return {
@@ -571,7 +611,8 @@ function NewSessionWizard() {
 
     // Computed values
     const compatibleProfiles = React.useMemo(() => {
-        return allProfiles.filter(profile => validateProfileForAgent(profile, agentType));
+        const profileAgent = agentType === 'copilot' ? 'codex' : agentType;
+        return allProfiles.filter(profile => validateProfileForAgent(profile, profileAgent));
     }, [allProfiles, agentType]);
 
     const selectedProfile = React.useMemo(() => {
@@ -585,11 +626,6 @@ function NewSessionWizard() {
         // Check built-in profiles
         return getBuiltInProfile(selectedProfileId);
     }, [selectedProfileId, profileMap]);
-
-    const selectedMachine = React.useMemo(() => {
-        if (!selectedMachineId) return null;
-        return machines.find(m => m.id === selectedMachineId);
-    }, [selectedMachineId, machines]);
 
     // Get recent paths for the selected machine
     // Recent machines computed from sessions (for inline machine selection)
@@ -683,11 +719,13 @@ function NewSessionWizard() {
             if (supportedCLIs.length === 1) {
                 const requiredAgent = supportedCLIs[0] as 'claude' | 'codex' | 'gemini';
                 // Check if this agent is available and allowed
-                const isAvailable = cliAvailability[requiredAgent] !== false;
-                const isAllowed = requiredAgent !== 'gemini' || experimentsEnabled;
+                const isAvailable = requiredAgent === 'gemini'
+                    ? copilotAvailable
+                    : cliAvailability[requiredAgent] !== false;
+                const isAllowed = requiredAgent !== 'gemini';
 
                 if (isAvailable && isAllowed) {
-                    setAgentType(requiredAgent);
+                    setAgentType(requiredAgent as NewSessionAgentType);
                 }
                 // If the required CLI is unavailable or not allowed, keep current agent (profile will show as unavailable)
             }
@@ -702,15 +740,15 @@ function NewSessionWizard() {
                 setPermissionMode(profile.defaultPermissionMode as PermissionMode);
             }
         }
-    }, [profileMap, cliAvailability.claude, cliAvailability.codex, cliAvailability.gemini, experimentsEnabled]);
+    }, [profileMap, cliAvailability.claude, cliAvailability.codex, copilotAvailable]);
 
     // Reset permission mode to 'default' when agent type changes and current mode is invalid for new agent
     React.useEffect(() => {
         const validClaudeModes: PermissionMode[] = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
-        const validCodexGeminiModes: PermissionMode[] = ['default', 'read-only', 'safe-yolo', 'yolo'];
+        const validCodexCopilotModes: PermissionMode[] = ['default', 'read-only', 'safe-yolo', 'yolo'];
 
-        const isValidForCurrentAgent = (agentType === 'codex' || agentType === 'gemini')
-            ? validCodexGeminiModes.includes(permissionMode)
+        const isValidForCurrentAgent = (agentType === 'codex' || agentType === 'copilot')
+            ? validCodexCopilotModes.includes(permissionMode)
             : validClaudeModes.includes(permissionMode);
 
         if (!isValidForCurrentAgent) {
@@ -722,14 +760,10 @@ function NewSessionWizard() {
     React.useEffect(() => {
         const validClaudeModes: ModelMode[] = ['default', 'adaptiveUsage', 'sonnet', 'opus'];
         const validCodexModes: ModelMode[] = ['gpt-5-codex-high', 'gpt-5-codex-medium', 'gpt-5-codex-low', 'gpt-5-minimal', 'gpt-5-low', 'gpt-5-medium', 'gpt-5-high'];
-        // Note: 'default' is NOT valid for Gemini - we want explicit model selection
-        const validGeminiModes: ModelMode[] = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
 
         let isValidForCurrentAgent = false;
         if (agentType === 'codex') {
             isValidForCurrentAgent = validCodexModes.includes(modelMode);
-        } else if (agentType === 'gemini') {
-            isValidForCurrentAgent = validGeminiModes.includes(modelMode);
         } else {
             isValidForCurrentAgent = validClaudeModes.includes(modelMode);
         }
@@ -738,8 +772,6 @@ function NewSessionWizard() {
             // Set appropriate default for each agent type
             if (agentType === 'codex') {
                 setModelMode('gpt-5-codex-high');
-            } else if (agentType === 'gemini') {
-                setModelMode('gemini-2.5-pro');
             } else {
                 setModelMode('default');
             }
@@ -995,6 +1027,44 @@ function NewSessionWizard() {
         }
     }, [selectedMachineId, selectedPath, router]);
 
+    const handleOpenVscode = React.useCallback(async (appTarget: 'vscode' | 'insiders' = 'vscode') => {
+        if (!selectedMachineId || !selectedMachine) {
+            return;
+        }
+
+        setIsOpeningVscode(true);
+        try {
+            const homeDir = selectedMachine.metadata?.homeDir;
+            const pathForWorkspace = resolveAbsolutePath(selectedPath || homeDir || '~', homeDir);
+            const result = await machineOpenVscodeSession(selectedMachineId, {
+                workspaceDir: pathForWorkspace,
+                newWindow: true,
+                appTarget,
+            });
+
+            if (!result.ok) {
+                throw new Error('Failed to open VS Code.');
+            }
+
+            const displayedPath = formatPathRelativeToHome(pathForWorkspace, homeDir);
+            const appLabel = appTarget === 'insiders' ? 'VS Code Insiders' : 'VS Code';
+            Modal.alert(
+                t('common.success'),
+                result.mode === 'queued'
+                    ? `Requested an active ${appLabel} window to open this conversation.`
+                    : `Opened ${appLabel} for ${displayedPath}.`
+            );
+            await sync.refreshMachines();
+        } catch (error) {
+            Modal.alert(
+                t('common.error'),
+                error instanceof Error ? error.message : 'Failed to open VS Code.'
+            );
+        } finally {
+            setIsOpeningVscode(false);
+        }
+    }, [selectedMachineId, selectedMachine, selectedPath]);
+
     // Session creation
     const handleCreateSession = React.useCallback(async () => {
         if (!selectedMachineId) {
@@ -1010,6 +1080,56 @@ function NewSessionWizard() {
 
         try {
             let actualPath = selectedPath;
+
+            if (agentType === 'copilot') {
+                if (!preferredVscodeSession) {
+                    Modal.alert(
+                        t('common.error'),
+                        'No VS Code sessions detected. Open VS Code with the Happy bridge extension and start a chat first.',
+                        [
+                            { text: t('common.cancel'), style: 'cancel' },
+                            {
+                                text: 'Open VS Code',
+                                onPress: () => {
+                                    void handleOpenVscode('vscode');
+                                }
+                            },
+                            {
+                                text: 'Open VS Code Insiders',
+                                onPress: () => {
+                                    void handleOpenVscode('insiders');
+                                }
+                            }
+                        ]
+                    );
+                    setIsCreating(false);
+                    return;
+                }
+
+                const message = sessionPrompt.trim();
+                if (!message) {
+                    Modal.alert(t('common.error'), 'Please enter a message to send to VS Code.');
+                    setIsCreating(false);
+                    return;
+                }
+
+                const queued = await machineSendVscodeMessage(
+                    selectedMachineId,
+                    preferredVscodeSession.instanceId,
+                    preferredVscodeSession.id,
+                    message
+                );
+
+                if (!queued.queued) {
+                    throw new Error('Failed to queue message in VS Code session.');
+                }
+
+                clearNewSessionDraft();
+                Modal.alert(t('common.success'), `Queued in VS Code: ${preferredVscodeSession.title}`);
+                setIsCreating(false);
+                router.replace(`/machine/${selectedMachineId}`);
+                return;
+            }
 
             // Handle worktree creation
             if (sessionType === 'worktree' && experimentsEnabled) {
@@ -1043,7 +1163,7 @@ function NewSessionWizard() {
             if (selectedProfileId) {
                 const selectedProfile = profileMap.get(selectedProfileId);
                 if (selectedProfile) {
-                    environmentVariables = transformProfileToEnvironmentVars(selectedProfile, agentType);
+                    environmentVariables = transformProfileToEnvironmentVars(selectedProfile);
                 }
             }
 
@@ -1063,9 +1183,6 @@ function NewSessionWizard() {
 
                 // Set permission mode and model mode on the session
                 storage.getState().updateSessionPermissionMode(result.sessionId, permissionMode);
-                if (agentType === 'gemini' && modelMode && modelMode !== 'default') {
-                    storage.getState().updateSessionModelMode(result.sessionId, modelMode as 'gemini-2.5-pro' | 'gemini-2.5-flash' | 'gemini-2.5-flash-lite');
-                }
 
                 // Send initial message if provided
                 if (sessionPrompt.trim()) {
@@ -1093,7 +1210,7 @@ function NewSessionWizard() {
             Modal.alert(t('common.error'), errorMessage);
             setIsCreating(false);
         }
-    }, [selectedMachineId, selectedPath, sessionPrompt, sessionType, experimentsEnabled, agentType, selectedProfileId, permissionMode, modelMode, recentMachinePaths, profileMap, router]);
+    }, [selectedMachineId, selectedPath, sessionPrompt, sessionType, experimentsEnabled, agentType, selectedProfileId, permissionMode, modelMode, recentMachinePaths, profileMap, preferredVscodeSession, router, handleOpenVscode]);
 
     const screenWidth = useWindowDimensions().width;
 
@@ -1113,10 +1230,10 @@ function NewSessionWizard() {
             cliStatus: includeCLI ? {
                 claude: cliAvailability.claude,
                 codex: cliAvailability.codex,
-                ...(experimentsEnabled && { gemini: cliAvailability.gemini }),
+                copilot: copilotAvailable,
             } : undefined,
         };
-    }, [selectedMachine, selectedMachineId, cliAvailability, experimentsEnabled, theme]);
+    }, [selectedMachine, selectedMachineId, cliAvailability, copilotAvailable, theme]);
 
     // Persist the current wizard state so it survives remounts and screen navigation
     // Uses debouncing to avoid excessive writes
@@ -1265,16 +1382,14 @@ function NewSessionWizard() {
                                                 codex
                                             </Text>
                                         </View>
-                                        {experimentsEnabled && (
-                                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                                                <Text style={{ fontSize: 11, color: cliAvailability.gemini ? theme.colors.success : theme.colors.textDestructive, ...Typography.default() }}>
-                                                    {cliAvailability.gemini ? '✓' : '✗'}
-                                                </Text>
-                                                <Text style={{ fontSize: 11, color: cliAvailability.gemini ? theme.colors.success : theme.colors.textDestructive, ...Typography.default() }}>
-                                                    gemini
-                                                </Text>
-                                            </View>
-                                        )}
+                                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                                            <Text style={{ fontSize: 11, color: copilotAvailable ? theme.colors.success : theme.colors.textDestructive, ...Typography.default() }}>
+                                                {copilotAvailable ? '✓' : '✗'}
+                                            </Text>
+                                            <Text style={{ fontSize: 11, color: copilotAvailable ? theme.colors.success : theme.colors.textDestructive, ...Typography.default() }}>
+                                                vscode
+                                            </Text>
+                                        </View>
                                     </View>
                                 </View>
                             )}
@@ -1286,7 +1401,7 @@ function NewSessionWizard() {
                                 <Text style={[styles.sectionHeader, { marginBottom: 0, marginTop: 0 }]}>Choose AI Profile</Text>
                             </View>
                             <Text style={styles.sectionDescription}>
-                                Choose which AI backend runs your session (Claude or Codex). Create custom profiles for alternative APIs.
+                                Choose which backend runs your session (Claude, Codex, or VS Code). Create custom profiles for alternative APIs.
                             </Text>
 
                             {/* Missing CLI Installation Banners */}
@@ -1434,7 +1549,7 @@ function NewSessionWizard() {
                                 </View>
                             )}
 
-                            {selectedMachineId && cliAvailability.gemini === false && experimentsEnabled && !isWarningDismissed('gemini') && !hiddenBanners.gemini && (
+                            {selectedMachineId && !copilotAvailable && !isWarningDismissed('gemini') && !hiddenBanners.gemini && (
                                 <View style={{
                                     backgroundColor: theme.colors.box.warning.background,
                                     borderRadius: 10,
@@ -1447,7 +1562,7 @@ function NewSessionWizard() {
                                         <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginRight: 16 }}>
                                             <Ionicons name="warning" size={16} color={theme.colors.warning} />
                                             <Text style={{ fontSize: 13, fontWeight: '600', color: theme.colors.text, ...Typography.default('semiBold') }}>
-                                                Gemini CLI Not Detected
+                                                VS Code Bridge Not Connected
                                             </Text>
                                             <View style={{ flex: 1, minWidth: 20 }} />
                                             <Text style={{ fontSize: 10, color: theme.colors.textSecondary, ...Typography.default() }}>
@@ -1491,15 +1606,26 @@ function NewSessionWizard() {
                                     </View>
                                     <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
                                         <Text style={{ fontSize: 11, color: theme.colors.textSecondary, ...Typography.default() }}>
-                                            Install gemini CLI if available •
+                                            Start VS Code with the Happy bridge extension enabled.
                                         </Text>
-                                        <Pressable onPress={() => {
-                                            if (Platform.OS === 'web') {
-                                                window.open('https://ai.google.dev/gemini-api/docs/get-started', '_blank');
-                                            }
-                                        }}>
-                                            <Text style={{ fontSize: 11, color: theme.colors.textLink, ...Typography.default() }}>
-                                                View Gemini Docs →
+                                        <Pressable
+                                            onPress={() => {
+                                                void handleOpenVscode('vscode');
+                                            }}
+                                            disabled={isOpeningVscode}
+                                        >
+                                            <Text style={{ fontSize: 11, color: theme.colors.textLink, ...Typography.default(), opacity: isOpeningVscode ? 0.6 : 1 }}>
+                                                {isOpeningVscode ? 'Opening VS Code…' : 'Open VS Code Now →'}
+                                            </Text>
+                                        </Pressable>
+                                        <Pressable
+                                            onPress={() => {
+                                                void handleOpenVscode('insiders');
+                                            }}
+                                            disabled={isOpeningVscode}
+                                        >
+                                            <Text style={{ fontSize: 11, color: theme.colors.textLink, ...Typography.default(), opacity: isOpeningVscode ? 0.6 : 1 }}>
+                                                {isOpeningVscode ? 'Opening VS Code Insiders…' : 'Open VS Code Insiders →'}
                                             </Text>
                                         </Pressable>
                                     </View>
@@ -1842,7 +1968,7 @@ function NewSessionWizard() {
                                 <Text style={styles.sectionHeader}>4. Permission Mode</Text>
                             </View>
                             <ItemGroup title="">
-                                {(agentType === 'codex'
+                                {(agentType === 'codex' || agentType === 'copilot'
                                     ? [
                                         { value: 'default' as PermissionMode, label: 'Default', description: 'Ask for permissions', icon: 'shield-outline' },
                                         { value: 'read-only' as PermissionMode, label: 'Read Only', description: 'Read-only mode', icon: 'eye-outline' },

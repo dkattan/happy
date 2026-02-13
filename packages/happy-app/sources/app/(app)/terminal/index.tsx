@@ -16,31 +16,46 @@ export default function TerminalScreen() {
     const router = useRouter();
     const searchParams = useLocalSearchParams();
     const { theme } = useUnistyles();
+    const hasAutoConnectedRef = React.useRef(false);
 
     // const [urlProcessed, setUrlProcessed] = useState(false);
     const publicKey = React.useMemo(() => {
+        const directKey = typeof searchParams.key === 'string' ? searchParams.key : null;
+        if (directKey) {
+            return directKey;
+        }
+
         const keys = Object.keys(searchParams);
         if (keys.length > 0) {
-            // If we have any search params, the first one should be our key
-            const key = keys[0];
+            // Keep backward compatibility with legacy "happy://terminal?<publicKey>" URLs
+            const key = keys.find(k => k !== 'autoconnect') || keys[0];
             return key;
         } else {
             return null;
         }
     }, [searchParams])
+    const shouldAutoConnect = __DEV__ && (searchParams.autoconnect === '1' || searchParams.autoconnect === '');
     const { processAuthUrl, isLoading } = useConnectTerminal({
         onSuccess: () => {
             router.back();
         }
     });
 
-    const handleConnect = async () => {
+    const handleConnect = React.useCallback(async () => {
         if (publicKey) {
             // Use the full happy:// URL format expected by the hook
             const authUrl = `happy://terminal?${publicKey}`;
             await processAuthUrl(authUrl);
         }
-    };
+    }, [publicKey, processAuthUrl]);
+
+    React.useEffect(() => {
+        if (!shouldAutoConnect || !publicKey || hasAutoConnectedRef.current) {
+            return;
+        }
+        hasAutoConnectedRef.current = true;
+        void handleConnect();
+    }, [shouldAutoConnect, publicKey, handleConnect]);
 
     const handleReject = () => {
         router.back();

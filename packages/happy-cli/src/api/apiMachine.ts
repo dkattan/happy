@@ -76,6 +76,15 @@ type MachineRpcHandlers = {
     vscodeListInstances: () => any;
     vscodeListSessions: (instanceId: string) => any;
     vscodeSendMessage: (instanceId: string, sessionId: string, message: string) => any;
+    vscodeGetSessionHistory: (instanceId: string, sessionId: string, limit?: number) => any;
+    vscodeOpenSession: (params: {
+        instanceId?: string;
+        sessionId?: string;
+        workspaceDir?: string;
+        workspaceFile?: string;
+        newWindow?: boolean;
+        appTarget?: 'vscode' | 'insiders';
+    }) => any;
 }
 
 export class ApiMachineClient {
@@ -104,7 +113,9 @@ export class ApiMachineClient {
         requestShutdown,
         vscodeListInstances,
         vscodeListSessions,
-        vscodeSendMessage
+        vscodeSendMessage,
+        vscodeGetSessionHistory,
+        vscodeOpenSession
     }: MachineRpcHandlers) {
         // Register spawn session handler
         this.rpcHandlerManager.registerHandler('spawn-happy-session', async (params: any) => {
@@ -179,6 +190,38 @@ export class ApiMachineClient {
                 throw new Error('instanceId, sessionId, and message are required');
             }
             return vscodeSendMessage(instanceId, sessionId, message);
+        });
+
+        this.rpcHandlerManager.registerHandler('vscode-get-session-history', (params: any) => {
+            const { instanceId, sessionId, limit } = params || {};
+            if (!instanceId || !sessionId) {
+                throw new Error('instanceId and sessionId are required');
+            }
+            return vscodeGetSessionHistory(instanceId, sessionId, limit);
+        });
+
+        this.rpcHandlerManager.registerHandler('vscode-open-session', (params: any) => {
+            const {
+                instanceId,
+                sessionId,
+                workspaceDir,
+                workspaceFile,
+                newWindow,
+                appTarget,
+            } = params || {};
+
+            if (!instanceId && !sessionId && !workspaceDir && !workspaceFile) {
+                throw new Error('Provide at least one of instanceId, sessionId, workspaceDir, or workspaceFile');
+            }
+
+            return vscodeOpenSession({
+                instanceId,
+                sessionId,
+                workspaceDir,
+                workspaceFile,
+                newWindow,
+                appTarget,
+            });
         });
     }
 
