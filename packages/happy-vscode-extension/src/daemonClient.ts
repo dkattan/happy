@@ -34,6 +34,8 @@ export type VscodeCommand = {
   } | {
     type: 'openSession';
     sessionId: string;
+  } | {
+    type: 'newConversation';
   }
 );
 

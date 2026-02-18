@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Pressable, FlatList, Platform } from 'react-native';
+import { View, Pressable, FlatList, Platform, TextInput, ActivityIndicator } from 'react-native';
 import { Swipeable } from 'react-native-gesture-handler';
 import { Text } from '@/components/StyledText';
 import { usePathname } from 'expo-router';
@@ -15,7 +15,7 @@ import { useVisibleSessionListViewData } from '@/hooks/useVisibleSessionListView
 import { Typography } from '@/constants/Typography';
 import { Session } from '@/sync/storageTypes';
 import { StatusDot } from './StatusDot';
-import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { StyleSheet } from 'react-native-unistyles';
 import { useIsTablet } from '@/utils/responsive';
 import { requestReview } from '@/utils/requestReview';
 import { UpdateBanner } from './UpdateBanner';
@@ -23,10 +23,8 @@ import { layout } from './layout';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { t } from '@/text';
 import { useRouter } from 'expo-router';
-import { Item } from './Item';
-import { ItemGroup } from './ItemGroup';
 import { useHappyAction } from '@/hooks/useHappyAction';
-import { sessionDelete } from '@/sync/ops';
+import { machineOpenVscodeSession, sessionDelete, type VscodeAppTarget } from '@/sync/ops';
 import { HappyError } from '@/utils/errors';
 import { Modal } from '@/modal';
 
@@ -245,27 +243,87 @@ const stylesheet = StyleSheet.create((theme) => ({
         alignItems: 'center',
     },
     copilotStatusText: {
-        marginLeft: 4,
         fontSize: 12,
         ...Typography.default(),
     },
     copilotInstanceHeader: {
-        paddingHorizontal: 16,
-        paddingTop: 12,
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 12,
+        paddingTop: 10,
         paddingBottom: 10,
         backgroundColor: theme.colors.surfaceHighest,
+    },
+    copilotInstanceMain: {
+        flex: 1,
+    },
+    copilotInstanceHeaderPressable: {
+        flex: 1,
+        paddingHorizontal: 16,
+        paddingVertical: 2,
     },
     copilotInstanceHeaderFirst: {
         borderTopLeftRadius: 12,
         borderTopRightRadius: 12,
     },
+    copilotInstanceTitleRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+    },
     copilotInstanceTitle: {
+        flex: 1,
         fontSize: 13,
         color: theme.colors.text,
         ...Typography.default('semiBold'),
     },
+    copilotInstanceChevron: {
+        marginLeft: 8,
+    },
     copilotInstanceSubtitle: {
         marginTop: 2,
+        fontSize: 12,
+        color: theme.colors.textSecondary,
+        ...Typography.default(),
+    },
+    copilotInstanceActions: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginLeft: 8,
+    },
+    copilotInstanceActionButton: {
+        width: 32,
+        height: 32,
+        borderRadius: 16,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: theme.colors.surface,
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: theme.colors.divider,
+    },
+    copilotSearchContainer: {
+        paddingHorizontal: 16,
+        paddingBottom: 10,
+        backgroundColor: theme.colors.surfaceHighest,
+    },
+    copilotSearchInput: {
+        height: 34,
+        borderRadius: 8,
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: theme.colors.divider,
+        backgroundColor: theme.colors.surface,
+        color: theme.colors.text,
+        paddingHorizontal: 10,
+        fontSize: 13,
+        ...Typography.default(),
+    },
+    copilotEmptySearchRow: {
+        paddingHorizontal: 16,
+        paddingVertical: 12,
+        borderBottomWidth: StyleSheet.hairlineWidth,
+        borderBottomColor: theme.colors.divider,
+        backgroundColor: theme.colors.surface,
+    },
+    copilotEmptySearchText: {
         fontSize: 12,
         color: theme.colors.textSecondary,
         ...Typography.default(),
@@ -320,23 +378,74 @@ function getInstanceLabel(conversation: CopilotConversationListItem): string {
     return `${instance.appName} (${instance.platform})`;
 }
 
+function getWorkspaceLabel(conversation: CopilotConversationListItem): string {
+    const displayName = conversation.session.displayName;
+    if (displayName && displayName.trim().length > 0) {
+        return displayName.trim();
+    }
+
+    const workspaceDir = conversation.session.workspaceDir;
+    const workspaceTail = getPathTail(workspaceDir);
+    if (workspaceTail) {
+        return workspaceTail;
+    }
+
+    const workspaceFileTail = getPathTail(conversation.instance?.workspaceFile);
+    if (workspaceFileTail) {
+        return workspaceFileTail;
+    }
+
+    return conversation.session.source === 'empty-window'
+        ? t('machine.vscodeEmptyWindow')
+        : t('machine.vscodeWorkspace');
+}
+
+function formatWorkspaceId(workspaceId: string | null | undefined): string {
+    if (!workspaceId || workspaceId.trim().length === 0) {
+        return '';
+    }
+    const trimmed = workspaceId.trim();
+    return trimmed.length > 8 ? `${trimmed.slice(0, 8)}...` : trimmed;
+}
+
 export function SessionsList() {
     const styles = stylesheet;
     const safeArea = useSafeAreaInsets();
     const data = useVisibleSessionListViewData();
     const pathname = usePathname();
     const isTablet = useIsTablet();
-    const navigateToSession = useNavigateToSession();
     const compactSessionView = useSetting('compactSessionView');
     const router = useRouter();
     const selectable = isTablet;
-    const experiments = useSetting('experiments');
     const dataWithSelected = selectable ? React.useMemo(() => {
         return data?.map(item => ({
             ...item,
             selected: pathname.startsWith(`/session/${item.type === 'session' ? item.session.id : ''}`)
         }));
     }, [data, pathname]) : data;
+
+    const handleCreateConversationForInstance = React.useCallback(async (conversation: CopilotConversationListItem) => {
+        const appTarget: VscodeAppTarget = conversation.instance?.appName?.toLowerCase().includes('insider')
+            ? 'insiders'
+            : 'vscode';
+        try {
+            const result = await machineOpenVscodeSession(conversation.machine.id, {
+                instanceId: conversation.session.instanceId,
+                workspaceDir: conversation.session.workspaceDir,
+                workspaceFile: conversation.instance?.workspaceFile ?? undefined,
+                newWindow: false,
+                appTarget,
+            });
+            if (!result.ok) {
+                throw new Error('Failed to create a new Copilot conversation.');
+            }
+        } catch (error) {
+            Modal.alert(
+                t('common.error'),
+                error instanceof Error ? error.message : 'Failed to create a new Copilot conversation.'
+            );
+        }
+    }, []);
 
     // Request review
     React.useEffect(() => {
@@ -427,10 +536,11 @@ export function SessionsList() {
                         onPressConversation={(conversation) => router.push(
                             `/copilot/${encodeURIComponent(conversation.machine.id)}/${encodeURIComponent(conversation.session.instanceId)}/${encodeURIComponent(conversation.session.id)}` as any
                         )}
+                        onCreateConversation={handleCreateConversationForInstance}
                     />
                 );
         }
-    }, [pathname, dataWithSelected, compactSessionView, router]);
+    }, [pathname, dataWithSelected, compactSessionView, router, handleCreateConversationForInstance]);
 
 
     // Remove this section as we'll use FlatList for all items now
@@ -609,21 +719,28 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
     );
 });
 
-const CopilotSessionsGroup = React.memo(({ conversations, onPressConversation }: {
+const CopilotSessionsGroup = React.memo(({ conversations, onPressConversation, onCreateConversation }: {
     conversations: CopilotConversationListItem[];
     onPressConversation: (conversation: CopilotConversationListItem) => void;
+    onCreateConversation: (conversation: CopilotConversationListItem) => Promise<void>;
 }) => {
     const styles = stylesheet;
+    const [collapsedByInstance, setCollapsedByInstance] = React.useState<Record<string, boolean>>({});
+    const [searchByInstance, setSearchByInstance] = React.useState<Record<string, string>>({});
+    const [creatingByInstance, setCreatingByInstance] = React.useState<Record<string, boolean>>({});
+
     const groupedConversationsByApp = React.useMemo(() => {
         const appGroups = new Map<string, {
             key: 'vscode' | 'insiders' | 'other';
             label: string;
-            appLastSeen: number;
+            appLastResponse: number;
             instances: Map<string, {
                 key: string;
                 machineName: string;
                 instanceLabel: string;
-                instanceLastSeen: number;
+                workspaceLabel: string;
+                workspaceId: string;
+                instanceLastResponse: number;
                 conversations: CopilotConversationListItem[];
             }>;
         }>();
@@ -634,29 +751,36 @@ const CopilotSessionsGroup = React.memo(({ conversations, onPressConversation }:
                 || conversation.machine.metadata?.host
                 || conversation.machine.id;
             const instanceLabel = getInstanceLabel(conversation);
-            const instanceLastSeen = conversation.instance?.lastSeen ?? conversation.session.lastMessageDate ?? 0;
+            const workspaceLabel = getWorkspaceLabel(conversation);
+            const workspaceId = formatWorkspaceId(conversation.session.workspaceId);
+            const instanceLastResponse = conversation.session.lastMessageDate
+                || conversation.instance?.lastSeen
+                || 0;
             const instanceKey = `${conversation.machine.id}:${conversation.session.instanceId}`;
             const existingAppGroup = appGroups.get(appFamily.key);
             const appGroup = existingAppGroup ?? {
                 key: appFamily.key,
                 label: appFamily.label,
-                appLastSeen: 0,
+                appLastResponse: 0,
                 instances: new Map<string, {
                     key: string;
                     machineName: string;
                     instanceLabel: string;
-                    instanceLastSeen: number;
+                    workspaceLabel: string;
+                    workspaceId: string;
+                    instanceLastResponse: number;
                     conversations: CopilotConversationListItem[];
                 }>()
             };
 
-            appGroup.appLastSeen = Math.max(appGroup.appLastSeen, instanceLastSeen);
+            appGroup.appLastResponse = Math.max(appGroup.appLastResponse, instanceLastResponse);
 
             const existing = appGroup.instances.get(instanceKey);
             if (existing) {
                 existing.conversations.push(conversation);
-                if (instanceLastSeen > existing.instanceLastSeen) {
-                    existing.instanceLastSeen = instanceLastSeen;
+                existing.instanceLastResponse = Math.max(existing.instanceLastResponse, instanceLastResponse);
+                if (!existing.workspaceId && workspaceId) {
+                    existing.workspaceId = workspaceId;
                 }
                 appGroups.set(appFamily.key, appGroup);
                 return;
@@ -666,7 +790,9 @@ const CopilotSessionsGroup = React.memo(({ conversations, onPressConversation }:
                 key: instanceKey,
                 machineName,
                 instanceLabel,
-                instanceLastSeen,
+                workspaceLabel,
+                workspaceId,
+                instanceLastResponse,
                 conversations: [conversation],
             });
             appGroups.set(appFamily.key, appGroup);
@@ -680,7 +806,7 @@ const CopilotSessionsGroup = React.memo(({ conversations, onPressConversation }:
 
         const normalized = Array.from(appGroups.values()).map((appGroup) => {
             const instances = Array.from(appGroup.instances.values());
-            instances.sort((a, b) => b.instanceLastSeen - a.instanceLastSeen);
+            instances.sort((a, b) => b.instanceLastResponse - a.instanceLastResponse);
             instances.forEach((group) => {
                 const seenConversations = new Set<string>();
                 group.conversations = group.conversations.filter((conversation) => {
@@ -701,7 +827,7 @@ const CopilotSessionsGroup = React.memo(({ conversations, onPressConversation }:
             return {
                 key: appGroup.key,
                 label: appGroup.label,
-                appLastSeen: appGroup.appLastSeen,
+                appLastResponse: appGroup.appLastResponse,
                 instances,
             };
         });
@@ -711,11 +837,60 @@ const CopilotSessionsGroup = React.memo(({ conversations, onPressConversation }:
             if (orderDelta !== 0) {
                 return orderDelta;
             }
-            return b.appLastSeen - a.appLastSeen;
+            return b.appLastResponse - a.appLastResponse;
         });
 
         return normalized;
     }, [conversations]);
+
+    React.useEffect(() => {
+        const instanceKeys = new Set<string>();
+        groupedConversationsByApp.forEach((appGroup) => {
+            appGroup.instances.forEach((group) => {
+                instanceKeys.add(group.key);
+            });
+        });
+
+        setCollapsedByInstance((previous) => {
+            const next: Record<string, boolean> = {};
+            instanceKeys.forEach((key) => {
+                next[key] = previous[key] ?? true;
+            });
+            return next;
+        });
+
+        setSearchByInstance((previous) => {
+            const next: Record<string, string> = {};
+            instanceKeys.forEach((key) => {
+                next[key] = previous[key] ?? '';
+            });
+            return next;
+        });
+    }, [groupedConversationsByApp]);
+
+    const toggleCollapsed = React.useCallback((instanceKey: string) => {
+        setCollapsedByInstance((previous) => ({
+            ...previous,
+            [instanceKey]: !(previous[instanceKey] ?? true),
+        }));
+    }, []);
+
+    const handleSearchChange = React.useCallback((instanceKey: string, value: string) => {
+        setSearchByInstance((previous) => ({
+            ...previous,
+            [instanceKey]: value,
+        }));
+    }, []);
+
+    const handleCreateConversation = React.useCallback(async (instanceKey: string, seedConversation: CopilotConversationListItem) => {
+        setCreatingByInstance((previous) => ({ ...previous, [instanceKey]: true }));
+        try {
+            await onCreateConversation(seedConversation);
+            setCollapsedByInstance((previous) => ({ ...previous, [instanceKey]: false }));
+        } finally {
+            setCreatingByInstance((previous) => ({ ...previous, [instanceKey]: false }));
+        }
+    }, [onCreateConversation]);
 
     return (
         <View>
@@ -727,71 +902,153 @@ const CopilotSessionsGroup = React.memo(({ conversations, onPressConversation }:
                         </Text>
                     </View>
                     <View style={styles.copilotCard}>
-                        {appGroup.instances.map((group, groupIndex) => (
-                            <View key={`${appGroup.key}:${group.key}`}>
-                                <View
-                                    style={[
-                                        styles.copilotInstanceHeader,
-                                        groupIndex === 0 && styles.copilotInstanceHeaderFirst
-                                    ]}
-                                >
-                                    <Text style={styles.copilotInstanceTitle} numberOfLines={1}>
-                                        {group.machineName} • {group.instanceLabel}
-                                    </Text>
-                                    <Text style={styles.copilotInstanceSubtitle} numberOfLines={1}>
-                                        {t('status.lastSeen', { time: formatLastSeen(group.instanceLastSeen, false) })}
-                                    </Text>
-                                </View>
-                                {group.conversations.map((conversation, index) => {
-                                    const location = conversation.session.displayName
-                                        || (conversation.session.source === 'empty-window' ? t('machine.vscodeEmptyWindow') : t('machine.vscodeWorkspace'));
-                                    const statusText = conversation.session.needsInput
-                                        ? t('machine.vscodeNeedsInput')
-                                        : t('status.lastSeen', { time: formatLastSeen(conversation.session.lastMessageDate ?? 0, false) });
-                                    const statusColor = conversation.session.needsInput ? '#FF3B30' : '#999999';
-                                    const isLastInGroup = index === group.conversations.length - 1;
-                                    const isLastGroup = groupIndex === appGroup.instances.length - 1;
+                        {appGroup.instances.map((group, groupIndex) => {
+                            const isCollapsed = collapsedByInstance[group.key] ?? true;
+                            const search = (searchByInstance[group.key] ?? '').trim().toLowerCase();
+                            const visibleConversations = search.length === 0
+                                ? group.conversations
+                                : group.conversations.filter((conversation) => {
+                                    const searchable = `${conversation.session.title} ${conversation.session.id}`.toLowerCase();
+                                    return searchable.includes(search);
+                                });
+                            const isCreating = creatingByInstance[group.key] === true;
+                            const seedConversation = group.conversations[0];
+                            const conversationCountLabel = `${group.conversations.length} conversation${group.conversations.length === 1 ? '' : 's'}`;
+                            const lastResponseLabel = group.instanceLastResponse > 0
+                                ? formatLastSeen(group.instanceLastResponse, false)
+                                : 'none';
+                            const workspaceLabel = group.workspaceId
+                                ? `${group.workspaceLabel} (${group.workspaceId})`
+                                : group.workspaceLabel;
 
-                                    return (
+                            return (
+                                <View key={`${appGroup.key}:${group.key}`}>
+                                    <View
+                                        style={[
+                                            styles.copilotInstanceHeader,
+                                            groupIndex === 0 && styles.copilotInstanceHeaderFirst
+                                        ]}
+                                    >
                                         <Pressable
-                                            key={`${conversation.machine.id}:${conversation.session.instanceId}:${conversation.session.id}:${conversation.session.jsonPath}`}
-                                            style={[
-                                                styles.copilotRow,
-                                                (!isLastInGroup || !isLastGroup) && styles.copilotRowBorder
-                                            ]}
-                                            onPress={() => onPressConversation(conversation)}
+                                            style={styles.copilotInstanceHeaderPressable}
+                                            onPress={() => toggleCollapsed(group.key)}
                                         >
-                                            <View style={styles.copilotIconContainer}>
-                                                <Ionicons
-                                                    name={conversation.session.needsInput ? 'alert-circle' : 'logo-github'}
-                                                    size={18}
-                                                    color={conversation.session.needsInput ? '#FF3B30' : '#4A5568'}
-                                                />
-                                            </View>
-                                            <View style={styles.copilotContent}>
-                                                <View style={styles.copilotTitleRow}>
-                                                    <Text style={styles.copilotTitle} numberOfLines={1}>
-                                                        {conversation.session.title}
+                                            <View style={styles.copilotInstanceMain}>
+                                                <View style={styles.copilotInstanceTitleRow}>
+                                                    <Text style={styles.copilotInstanceTitle} numberOfLines={1}>
+                                                        {group.machineName} • {group.instanceLabel}
                                                     </Text>
+                                                    <Ionicons
+                                                        name={isCollapsed ? 'chevron-forward' : 'chevron-down'}
+                                                        size={14}
+                                                        color="#7C7C7C"
+                                                        style={styles.copilotInstanceChevron}
+                                                    />
                                                 </View>
-                                                <Text style={styles.copilotSubtitle} numberOfLines={1}>
-                                                    {location}
+                                                <Text style={styles.copilotInstanceSubtitle} numberOfLines={2}>
+                                                    {`Workspace ${workspaceLabel} • ${conversationCountLabel} • Last response ${lastResponseLabel}`}
                                                 </Text>
-                                                <View style={styles.copilotStatusRow}>
-                                                    <StatusDot color={statusColor} isPulsing={conversation.session.needsInput} />
-                                                    <Text style={[styles.copilotStatusText, { color: statusColor }]} numberOfLines={1}>
-                                                        {statusText}
-                                                    </Text>
-                                                </View>
                                             </View>
                                         </Pressable>
-                                    );
-                                })}
-                                {groupIndex < appGroup.instances.length - 1 && (
-                                    <View style={styles.copilotInstanceSeparator} />
-                                )}
-                            </View>
-                        ))}
+                                        <View style={styles.copilotInstanceActions}>
+                                            <Pressable
+                                                style={styles.copilotInstanceActionButton}
+                                                onPress={() => {
+                                                    if (!seedConversation || isCreating) return;
+                                                    void handleCreateConversation(group.key, seedConversation);
+                                                }}
+                                                disabled={!seedConversation || isCreating}
+                                                hitSlop={10}
+                                            >
+                                                {isCreating ? (
+                                                    <ActivityIndicator size="small" color="#7C7C7C" />
+                                                ) : (
+                                                    <Ionicons name="add" size={16} color="#7C7C7C" />
+                                                )}
+                                            </Pressable>
+                                        </View>
+                                    </View>
+
+                                    {!isCollapsed && (
+                                        <>
+                                            <View style={styles.copilotSearchContainer}>
+                                                <TextInput
+                                                    value={searchByInstance[group.key] ?? ''}
+                                                    onChangeText={(value) => handleSearchChange(group.key, value)}
+                                                    placeholder="Search conversations in this workspace"
+                                                    placeholderTextColor="#9C9C9C"
+                                                    style={styles.copilotSearchInput}
+                                                />
+                                            </View>
+                                            {visibleConversations.length === 0 && (
+                                                <View style={styles.copilotEmptySearchRow}>
+                                                    <Text style={styles.copilotEmptySearchText}>
+                                                        No matching conversations
+                                                    </Text>
+                                                </View>
+                                            )}
+                                            {visibleConversations.map((conversation, index) => {
+                                                const lastResponseAt = conversation.session.lastMessageDate ?? 0;
+                                                const statusText = conversation.session.needsInput
+                                                    ? t('machine.vscodeNeedsInput')
+                                                    : (lastResponseAt > 0
+                                                        ? `Last response ${formatLastSeen(lastResponseAt, false)}`
+                                                        : 'No responses yet');
+                                                const statusColor = conversation.session.needsInput ? '#FF3B30' : '#888888';
+                                                const isLastInGroup = index === visibleConversations.length - 1;
+                                                const isLastGroup = groupIndex === appGroup.instances.length - 1;
+
+                                                return (
+                                                    <Pressable
+                                                        key={`${conversation.machine.id}:${conversation.session.instanceId}:${conversation.session.id}:${conversation.session.jsonPath}`}
+                                                        style={[
+                                                            styles.copilotRow,
+                                                            (!isLastInGroup || !isLastGroup) && styles.copilotRowBorder
+                                                        ]}
+                                                        onPress={() => onPressConversation(conversation)}
+                                                    >
+                                                        <View style={styles.copilotIconContainer}>
+                                                            <Ionicons
+                                                                name={conversation.session.needsInput ? 'alert-circle' : 'logo-github'}
+                                                                size={18}
+                                                                color={conversation.session.needsInput ? '#FF3B30' : '#4A5568'}
+                                                            />
+                                                        </View>
+                                                        <View style={styles.copilotContent}>
+                                                            <View style={styles.copilotTitleRow}>
+                                                                <Text style={styles.copilotTitle} numberOfLines={1}>
+                                                                    {conversation.session.title}
+                                                                </Text>
+                                                            </View>
+                                                            <View style={styles.copilotStatusRow}>
+                                                                {conversation.session.needsInput && (
+                                                                    <StatusDot color={statusColor} isPulsing />
+                                                                )}
+                                                                <Text
+                                                                    style={[
+                                                                        styles.copilotStatusText,
+                                                                        {
+                                                                            color: statusColor,
+                                                                            marginLeft: conversation.session.needsInput ? 4 : 0
+                                                                        }
+                                                                    ]}
+                                                                    numberOfLines={1}
+                                                                >
+                                                                    {statusText}
+                                                                </Text>
+                                                            </View>
+                                                        </View>
+                                                    </Pressable>
+                                                );
+                                            })}
+                                        </>
+                                    )}
+                                    {groupIndex < appGroup.instances.length - 1 && (
+                                        <View style={styles.copilotInstanceSeparator} />
+                                    )}
+                                </View>
+                            );
+                        })}
                     </View>
                 </View>
             ))}

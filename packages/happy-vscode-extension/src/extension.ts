@@ -429,12 +429,15 @@ class HappyBridge {
   private async handleCommand(command: VscodeCommand): Promise<void> {
     if (!this.client) return;
     let ok = true;
+    const sessionLabel = 'sessionId' in command ? command.sessionId : 'new-conversation';
     try {
-      this.output.appendLine(`[bridge] Handling command ${command.id} (${command.type}) for session ${command.sessionId}.`);
+      this.output.appendLine(`[bridge] Handling command ${command.id} (${command.type}) for session ${sessionLabel}.`);
       if (command.type === 'sendMessage') {
         await this.sendMessageToChat(command.sessionId, command.message);
       } else if (command.type === 'openSession') {
         await this.openSessionInChat(command.sessionId);
+      } else if (command.type === 'newConversation') {
+        await this.startNewConversation();
       }
       this.output.appendLine(`[bridge] Command ${command.id} completed.`);
     } catch (error) {
@@ -508,6 +511,35 @@ class HappyBridge {
       await delay(80);
       await vscode.commands.executeCommand('workbench.action.chat.open');
     }
+  }
+
+  private async startNewConversation(): Promise<void> {
+    const commandCandidates = [
+      'workbench.action.chat.newChat',
+      'workbench.action.chat.new',
+      'chat.startSession',
+    ];
+
+    let started = false;
+    for (const commandId of commandCandidates) {
+      try {
+        await vscode.commands.executeCommand(commandId);
+        started = true;
+        break;
+      } catch {
+        // Try the next known command identifier.
+      }
+    }
+
+    if (!started) {
+      await vscode.commands.executeCommand('workbench.action.chat.open');
+    }
+
+    await delay(80);
+    await vscode.commands.executeCommand('workbench.action.chat.focusInput');
+    await delay(40);
+    await vscode.commands.executeCommand('workbench.action.chat.open');
+    this.lastOpenedChatSessionId = null;
   }
 
   private monitorLiveHistory(sessionId: string): void {

@@ -95,9 +95,8 @@ const stylesheet = StyleSheet.create((theme) => ({
         paddingHorizontal: 12,
         paddingTop: 8,
     },
-    stickyContextPane: {
+    requestNavigatorContainer: {
         marginHorizontal: 12,
-        marginTop: 10,
         marginBottom: 6,
         borderRadius: 12,
         borderWidth: StyleSheet.hairlineWidth,
@@ -106,18 +105,18 @@ const stylesheet = StyleSheet.create((theme) => ({
         paddingHorizontal: 12,
         paddingVertical: 10,
     },
-    stickyContextHeader: {
+    requestNavigatorHeader: {
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'space-between',
         marginBottom: 4,
     },
-    stickyContextTitle: {
+    requestNavigatorTitle: {
         fontSize: 12,
         color: theme.colors.textSecondary,
         ...Typography.default('semiBold'),
     },
-    stickyContextMeta: {
+    requestNavigatorMeta: {
         fontSize: 11,
         color: theme.colors.textSecondary,
         ...Typography.default(),
@@ -146,11 +145,35 @@ const stylesheet = StyleSheet.create((theme) => ({
         color: theme.colors.textSecondary,
         ...Typography.default(),
     },
-    stickyContextBody: {
+    requestPreviewText: {
         fontSize: 13,
         lineHeight: 18,
         color: theme.colors.text,
         ...Typography.default(),
+    },
+    requestNavigatorControls: {
+        marginTop: 8,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+    },
+    requestControlButton: {
+        width: 34,
+        height: 34,
+        borderRadius: 17,
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: theme.colors.divider,
+        backgroundColor: theme.colors.surfaceHighest,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    requestControlButtonDisabled: {
+        opacity: 0.5,
+    },
+    requestControlLabel: {
+        fontSize: 12,
+        color: theme.colors.textSecondary,
+        ...Typography.default('semiBold'),
     },
     composerRow: {
         flexDirection: 'row',
@@ -180,37 +203,16 @@ const stylesheet = StyleSheet.create((theme) => ({
     sendButtonInactive: {
         backgroundColor: theme.colors.surfaceHighest,
     },
-    newResponseContainer: {
-        marginHorizontal: 12,
-        marginBottom: 6,
-    },
-    newResponseButton: {
-        borderRadius: 999,
-        backgroundColor: theme.colors.surface,
-        borderWidth: StyleSheet.hairlineWidth,
-        borderColor: theme.colors.divider,
-        paddingHorizontal: 14,
-        paddingVertical: 9,
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-    },
-    newResponseButtonText: {
-        marginLeft: 8,
-        fontSize: 13,
-        color: theme.colors.text,
-        ...Typography.default('semiBold'),
-    },
-    newResponseButtonSubtext: {
-        marginLeft: 8,
-        fontSize: 11,
-        color: theme.colors.textSecondary,
-        ...Typography.default(),
-    },
 }));
 
 function formatTimestamp(timestamp: number): string {
-    return new Date(timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return new Date(timestamp).toLocaleString([], {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+    });
 }
 
 function normalizeMessages(
@@ -238,6 +240,16 @@ function normalizeMessages(
             return { id, role, text, timestamp };
         })
         .filter((message): message is VscodeConversationMessage => message !== null);
+}
+
+function sanitizeAssistantMarkdown(markdown: string): string {
+    if (!markdown || markdown.trim().length === 0) {
+        return '';
+    }
+    return markdown
+        .replace(/```thinking[\s\S]*?```/gi, '')
+        .replace(/<think>[\s\S]*?<\/think>/gi, '')
+        .trim();
 }
 
 type PendingUserMessage = {
@@ -368,7 +380,7 @@ export default function CopilotConversationScreen() {
                 indexes.push(i);
             }
         }
-        return indexes;
+        return indexes.reverse();
     }, [messages, latestAssistantIndex]);
     const currentPreviousRequestCursor = React.useMemo(() => {
         if (previousUserIndexesForLatest.length === 0) return 0;
@@ -422,8 +434,8 @@ export default function CopilotConversationScreen() {
 
     React.useEffect(() => {
         // Reset context pane target for every new assistant reply.
-        setPreviousRequestCursor(0);
-    }, [latestAssistantMessage?.id]);
+        setPreviousRequestCursor(Math.max(0, previousUserIndexesForLatest.length - 1));
+    }, [latestAssistantMessage?.id, previousUserIndexesForLatest.length]);
 
     React.useEffect(() => {
         const latestId = latestAssistantMessage?.id ?? null;
@@ -507,22 +519,35 @@ export default function CopilotConversationScreen() {
             setLastSeenAssistantId(latestAssistantMessage.id);
         }
         setHasUnreadLatestResponse(false);
-        setPreviousRequestCursor(0);
-    }, [latestAssistantMessage?.id, scrollToLatestAssistant]);
+        setPreviousRequestCursor(Math.max(0, previousUserIndexesForLatest.length - 1));
+    }, [latestAssistantMessage?.id, scrollToLatestAssistant, previousUserIndexesForLatest.length]);
 
-    const handlePreviousRequestPress = React.useCallback(() => {
+    const navigateToRequestCursor = React.useCallback((nextCursor: number) => {
         if (previousUserIndexesForLatest.length === 0) {
             return;
         }
 
-        const cursor = Math.min(previousRequestCursor, previousUserIndexesForLatest.length - 1);
-        const targetIndex = previousUserIndexesForLatest[cursor];
+        const boundedCursor = Math.max(0, Math.min(nextCursor, previousUserIndexesForLatest.length - 1));
+        const targetIndex = previousUserIndexesForLatest[boundedCursor];
         scrollToIndexSafe(targetIndex, { animated: true, viewPosition: 0 });
+        setPreviousRequestCursor(boundedCursor);
+    }, [previousUserIndexesForLatest, scrollToIndexSafe]);
 
-        if (cursor < previousUserIndexesForLatest.length - 1) {
-            setPreviousRequestCursor(cursor + 1);
-        }
-    }, [previousUserIndexesForLatest, previousRequestCursor, scrollToIndexSafe]);
+    const handleFirstRequestPress = React.useCallback(() => {
+        navigateToRequestCursor(0);
+    }, [navigateToRequestCursor]);
+
+    const handlePreviousRequestPress = React.useCallback(() => {
+        navigateToRequestCursor(currentPreviousRequestCursor - 1);
+    }, [navigateToRequestCursor, currentPreviousRequestCursor]);
+
+    const handleNextRequestPress = React.useCallback(() => {
+        navigateToRequestCursor(currentPreviousRequestCursor + 1);
+    }, [navigateToRequestCursor, currentPreviousRequestCursor]);
+
+    const handleLastRequestPress = React.useCallback(() => {
+        navigateToRequestCursor(previousUserIndexesForLatest.length - 1);
+    }, [navigateToRequestCursor, previousUserIndexesForLatest.length]);
 
     const handleSend = React.useCallback(async () => {
         if (!resolvedMachineId || !resolvedInstanceId || !resolvedSessionId) return;
@@ -649,12 +674,16 @@ export default function CopilotConversationScreen() {
     const title = history?.session?.title || 'Copilot';
     const machineName = machine?.metadata?.displayName || machine?.metadata?.host || resolvedMachineId || '';
     const previousRequestPreview = previousUserMessageForLatest?.text?.replace(/\s+/g, ' ').trim() ?? '';
-    const latestIndicatorText = isReadingLatestResponse ? 'Reading latest response' : 'Viewing history';
-    const latestIndicatorColor = isReadingLatestResponse ? theme.colors.success : theme.colors.textSecondary;
+    const latestIndicatorText = isReadingLatestResponse ? 'Viewing latest response' : 'Viewing history';
+    const latestIndicatorColor = hasUnreadLatestResponse
+        ? theme.colors.button.primary.background
+        : (isReadingLatestResponse ? theme.colors.success : theme.colors.textSecondary);
     const isWaitingForResponse = awaitingResponseSince !== null;
     const previousRequestMetaText = previousUserIndexesForLatest.length > 0
         ? `${Math.min(currentPreviousRequestCursor + 1, previousUserIndexesForLatest.length)} of ${previousUserIndexesForLatest.length}`
         : '';
+    const canGoBackward = currentPreviousRequestCursor > 0;
+    const canGoForward = currentPreviousRequestCursor < previousUserIndexesForLatest.length - 1;
 
     return (
         <>
@@ -685,39 +714,6 @@ export default function CopilotConversationScreen() {
                 behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
                 keyboardVerticalOffset={Platform.OS === 'ios' ? Constants.statusBarHeight + headerHeight : 0}
             >
-                {previousUserMessageForLatest && (
-                    <Pressable
-                        style={styles.stickyContextPane}
-                        onPress={handlePreviousRequestPress}
-                    >
-                        <View style={styles.stickyContextHeader}>
-                            <View>
-                                <Text style={styles.stickyContextTitle}>Previous request</Text>
-                                {previousRequestMetaText.length > 0 && (
-                                    <Text style={styles.stickyContextMeta}>{previousRequestMetaText}</Text>
-                                )}
-                            </View>
-                            <View style={styles.latestIndicator}>
-                                {isWaitingForResponse ? (
-                                    <View style={styles.waitingIndicator}>
-                                        <ActivityIndicator size="small" color={theme.colors.textSecondary} />
-                                        <Text style={styles.waitingIndicatorText}>Waiting for response</Text>
-                                    </View>
-                                ) : (
-                                    <>
-                                        <View style={[styles.latestIndicatorDot, { backgroundColor: latestIndicatorColor }]} />
-                                        <Text style={[styles.latestIndicatorText, { color: latestIndicatorColor }]}>
-                                            {latestIndicatorText}
-                                        </Text>
-                                    </>
-                                )}
-                            </View>
-                        </View>
-                        <Text style={styles.stickyContextBody} numberOfLines={2}>
-                            {previousRequestPreview}
-                        </Text>
-                    </Pressable>
-                )}
                 <FlatList
                     ref={listRef}
                     data={messages}
@@ -743,7 +739,7 @@ export default function CopilotConversationScreen() {
                                     {isUser ? (
                                         <Text style={styles.messageTextUser}>{item.text}</Text>
                                     ) : (
-                                        <MarkdownView markdown={item.text} />
+                                        <MarkdownView markdown={sanitizeAssistantMarkdown(item.text)} />
                                     )}
                                     <Text style={[styles.timestamp, isUser && styles.timestampUser]}>
                                         {formatTimestamp(item.timestamp)}
@@ -754,21 +750,77 @@ export default function CopilotConversationScreen() {
                     }}
                 />
 
-                {hasUnreadLatestResponse && latestAssistantMessage && (
-                    <View style={styles.newResponseContainer}>
-                        <Pressable
-                            style={styles.newResponseButton}
-                            onPress={handleJumpToLatestResponse}
-                        >
-                            <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
-                                <Ionicons name="arrow-down-circle-outline" size={18} color={theme.colors.text} />
-                                <View>
-                                    <Text style={styles.newResponseButtonText}>New response available</Text>
-                                    <Text style={styles.newResponseButtonSubtext}>Tap to jump to latest</Text>
-                                </View>
+                {previousUserMessageForLatest && (
+                    <View style={styles.requestNavigatorContainer}>
+                        <View style={styles.requestNavigatorHeader}>
+                            <View>
+                                <Text style={styles.requestNavigatorTitle}>Previous request</Text>
+                                {previousRequestMetaText.length > 0 && (
+                                    <Text style={styles.requestNavigatorMeta}>{previousRequestMetaText}</Text>
+                                )}
                             </View>
-                            <Ionicons name="chevron-down" size={16} color={theme.colors.textSecondary} />
+                            <Pressable
+                                style={styles.latestIndicator}
+                                disabled={!hasUnreadLatestResponse}
+                                onPress={handleJumpToLatestResponse}
+                            >
+                                {isWaitingForResponse ? (
+                                    <View style={styles.waitingIndicator}>
+                                        <ActivityIndicator size="small" color={theme.colors.textSecondary} />
+                                        <Text style={styles.waitingIndicatorText}>Waiting for response</Text>
+                                    </View>
+                                ) : (
+                                    <>
+                                        <View style={[styles.latestIndicatorDot, { backgroundColor: latestIndicatorColor }]} />
+                                        <Text style={[styles.latestIndicatorText, { color: latestIndicatorColor }]}>
+                                            {hasUnreadLatestResponse ? 'New response available' : latestIndicatorText}
+                                        </Text>
+                                    </>
+                                )}
+                            </Pressable>
+                        </View>
+                        <Pressable onPress={() => navigateToRequestCursor(currentPreviousRequestCursor)}>
+                            <Text style={styles.requestPreviewText} numberOfLines={2}>
+                                {previousRequestPreview}
+                            </Text>
                         </Pressable>
+                        <View style={styles.requestNavigatorControls}>
+                            <Pressable
+                                style={[styles.requestControlButton, !canGoBackward && styles.requestControlButtonDisabled]}
+                                onPress={handleFirstRequestPress}
+                                disabled={!canGoBackward}
+                                hitSlop={10}
+                            >
+                                <Ionicons name="play-skip-back" size={14} color={theme.colors.text} />
+                            </Pressable>
+                            <Pressable
+                                style={[styles.requestControlButton, !canGoBackward && styles.requestControlButtonDisabled]}
+                                onPress={handlePreviousRequestPress}
+                                disabled={!canGoBackward}
+                                hitSlop={10}
+                            >
+                                <Ionicons name="chevron-back" size={16} color={theme.colors.text} />
+                            </Pressable>
+                            <Text style={styles.requestControlLabel}>
+                                {previousRequestMetaText}
+                            </Text>
+                            <Pressable
+                                style={[styles.requestControlButton, !canGoForward && styles.requestControlButtonDisabled]}
+                                onPress={handleNextRequestPress}
+                                disabled={!canGoForward}
+                                hitSlop={10}
+                            >
+                                <Ionicons name="chevron-forward" size={16} color={theme.colors.text} />
+                            </Pressable>
+                            <Pressable
+                                style={[styles.requestControlButton, !canGoForward && styles.requestControlButtonDisabled]}
+                                onPress={handleLastRequestPress}
+                                disabled={!canGoForward}
+                                hitSlop={10}
+                            >
+                                <Ionicons name="play-skip-forward" size={14} color={theme.colors.text} />
+                            </Pressable>
+                        </View>
                     </View>
                 )}
 

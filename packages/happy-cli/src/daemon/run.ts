@@ -774,6 +774,22 @@ export async function startDaemon(): Promise<void> {
           vscodeBridge.findInstanceForWorkspace(workspaceDir, workspaceFile)
         );
 
+        // Reuse a live instance for creating a fresh chat conversation when requested.
+        if (resolvedInstanceId && !sessionId && newWindow !== true) {
+          const queued = vscodeBridge.queueNewConversation(resolvedInstanceId);
+          if (queued) {
+            logger.debug('[DAEMON RUN] Queued VS Code newConversation command', {
+              instanceId: resolvedInstanceId
+            });
+            return {
+              ok: true,
+              mode: 'queued',
+              instanceId: resolvedInstanceId,
+              commandId: queued.commandId
+            };
+          }
+        }
+
         // Respect explicit new-window requests: do not silently reuse a live instance.
         if (resolvedInstanceId && sessionId && newWindow !== true) {
           const queued = vscodeBridge.queueOpenSession(resolvedInstanceId, sessionId);

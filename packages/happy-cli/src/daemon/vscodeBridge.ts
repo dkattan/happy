@@ -41,6 +41,8 @@ export type VscodeCommand = {
   } | {
     type: 'openSession';
     sessionId: string;
+  } | {
+    type: 'newConversation';
   }
 );
 
@@ -452,6 +454,19 @@ export class VscodeBridge {
       id: nextCommandId(),
       type: 'openSession',
       sessionId,
+      createdAt: nowMs()
+    };
+    instance.commands.push(command);
+    this.emitUpdate();
+    return { queued: true, commandId: command.id };
+  }
+
+  queueNewConversation(instanceId: string): { queued: true; commandId: string } | null {
+    const instance = this.instances.get(instanceId);
+    if (!instance) return null;
+    const command: VscodeCommand = {
+      id: nextCommandId(),
+      type: 'newConversation',
       createdAt: nowMs()
     };
     instance.commands.push(command);
