@@ -1,7 +1,8 @@
 import React from 'react';
-import { View, Text, FlatList, Pressable, RefreshControl, Platform, ViewToken, ActivityIndicator } from 'react-native';
+import { View, Text, FlatList, Pressable, RefreshControl, Platform, ViewToken, ActivityIndicator, NativeSyntheticEvent, NativeScrollEvent, LayoutChangeEvent } from 'react-native';
 import { useLocalSearchParams, Stack } from 'expo-router';
 import Constants from 'expo-constants';
+import * as Clipboard from 'expo-clipboard';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -15,7 +16,9 @@ import {
     machineOpenVscodeSession,
     machineSendVscodeMessage,
     type VscodeConversationHistory,
-    type VscodeConversationMessage
+    type VscodeConversationMessage,
+    type VscodeConversationFileTree,
+    type VscodeConversationFileTreeNode
 } from '@/sync/ops';
 import { Modal } from '@/modal';
 import { MultiTextInput } from '@/components/MultiTextInput';
@@ -48,6 +51,7 @@ const stylesheet = StyleSheet.create((theme) => ({
         paddingHorizontal: 12,
         paddingTop: 10,
         paddingBottom: 8,
+        position: 'relative',
     },
     bubbleUser: {
         backgroundColor: theme.colors.button.primary.background,
@@ -62,6 +66,48 @@ const stylesheet = StyleSheet.create((theme) => ({
         fontSize: 15,
         lineHeight: 22,
         ...Typography.default(),
+    },
+    bubbleContent: {
+        paddingRight: 24,
+    },
+    messageCopyButton: {
+        position: 'absolute',
+        top: 8,
+        right: 8,
+        width: 20,
+        height: 20,
+        borderRadius: 10,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    messageCopyButtonDisabled: {
+        opacity: 0.35,
+    },
+    fileTreeContainer: {
+        marginTop: 8,
+        borderRadius: 8,
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: theme.colors.divider,
+        backgroundColor: theme.colors.surfaceHighest,
+        paddingHorizontal: 8,
+        paddingVertical: 8,
+    },
+    fileTreeBasePath: {
+        fontSize: 11,
+        color: theme.colors.textSecondary,
+        marginBottom: 4,
+        ...Typography.mono(),
+    },
+    fileTreeNodeRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        minHeight: 18,
+    },
+    fileTreeNodeLabel: {
+        marginLeft: 6,
+        fontSize: 12,
+        color: theme.colors.text,
+        ...Typography.mono(),
     },
     timestamp: {
         marginTop: 6,
@@ -233,11 +279,18 @@ function normalizeMessages(
             const role = value.role === 'assistant' ? 'assistant' : 'user';
             const text = typeof value.text === 'string' ? value.text : '';
             const timestamp = typeof value.timestamp === 'number' ? value.timestamp : index;
+            const fileTrees = normalizeFileTrees((value as { fileTrees?: unknown }).fileTrees);
             const id = typeof value.id === 'string' && value.id.length > 0
                 ? value.id
                 : `${sessionId}:fallback:${role}:${index}`;
 
-            return { id, role, text, timestamp };
+            return {
+                id,
+                role,
+                text,
+                timestamp,
+                fileTrees: fileTrees.length > 0 ? fileTrees : undefined
+            };
         })
         .filter((message): message is VscodeConversationMessage => message !== null);
 }
@@ -246,10 +299,112 @@ function sanitizeAssistantMarkdown(markdown: string): string {
     if (!markdown || markdown.trim().length === 0) {
         return '';
     }
+    const thinkingFencePattern = /```(?:\s*)(thinking|reasoning|analysis)[^\n]*\n?([\s\S]*?)```/gi;
     return markdown
-        .replace(/```thinking[\s\S]*?```/gi, '')
-        .replace(/<think>[\s\S]*?<\/think>/gi, '')
+        // Convert thinking/reasoning fenced blocks to plain markdown content so they render as text, not code boxes.
+        .replace(thinkingFencePattern, (_match, _kind, content: string) => content.trim())
+        .replace(/<think>([\s\S]*?)<\/think>/gi, (_match, content: string) => content.trim())
+        .replace(/<thinking>([\s\S]*?)<\/thinking>/gi, (_match, content: string) => content.trim())
         .trim();
+}
+
+function normalizeFileTreeNode(value: unknown): VscodeConversationFileTreeNode | null {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    const record = value as { label?: unknown; children?: unknown };
+    if (typeof record.label !== 'string' || record.label.length === 0) {
+        return null;
+    }
+
+    const children = Array.isArray(record.children)
+        ? record.children
+            .map((child) => normalizeFileTreeNode(child))
+            .filter((child): child is VscodeConversationFileTreeNode => child !== null)
+        : [];
+
+    if (children.length > 0) {
+        return { label: record.label, children };
+    }
+    return { label: record.label };
+}
+
+function normalizeFileTrees(value: unknown): VscodeConversationFileTree[] {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+
+    return value
+        .map((entry): VscodeConversationFileTree | null => {
+            if (!entry || typeof entry !== 'object') {
+                return null;
+            }
+            const record = entry as { basePath?: unknown; roots?: unknown };
+            const roots = Array.isArray(record.roots)
+                ? record.roots
+                    .map((root) => normalizeFileTreeNode(root))
+                    .filter((root): root is VscodeConversationFileTreeNode => root !== null)
+                : [];
+            if (roots.length === 0) {
+                return null;
+            }
+            return {
+                basePath: typeof record.basePath === 'string' ? record.basePath : undefined,
+                roots
+            };
+        })
+        .filter((entry): entry is VscodeConversationFileTree => entry !== null);
+}
+
+function serializeFileTreeNodes(nodes: VscodeConversationFileTreeNode[], depth: number = 0): string[] {
+    const lines: string[] = [];
+    for (const node of nodes) {
+        lines.push(`${'  '.repeat(depth)}${node.label}`);
+        if (Array.isArray(node.children) && node.children.length > 0) {
+            lines.push(...serializeFileTreeNodes(node.children, depth + 1));
+        }
+    }
+    return lines;
+}
+
+function getCopyTextForMessage(message: VscodeConversationMessage): string {
+    const chunks: string[] = [];
+    const text = typeof message.text === 'string' ? message.text.trim() : '';
+    if (text.length > 0) {
+        chunks.push(text);
+    }
+
+    if (Array.isArray(message.fileTrees) && message.fileTrees.length > 0) {
+        for (const tree of message.fileTrees) {
+            const lines = serializeFileTreeNodes(tree.roots);
+            if (lines.length === 0) {
+                continue;
+            }
+            if (tree.basePath) {
+                chunks.push([tree.basePath, ...lines].join('\n'));
+            } else {
+                chunks.push(lines.join('\n'));
+            }
+        }
+    }
+
+    return chunks.join('\n\n').trim();
+}
+
+function getRpcFriendlyErrorMessage(error: unknown, fallbackMessage: string): string {
+    const raw = error instanceof Error ? error.message : fallbackMessage;
+    const normalized = raw.toLowerCase();
+
+    if (normalized.includes('rpc method not available')) {
+        return 'Cannot reach the machine daemon right now. Make sure Happy daemon is running on that machine, then retry.';
+    }
+
+    if (normalized.includes('timeout') || normalized.includes('timed out')) {
+        return 'Timed out while waiting for the machine daemon. Check that VS Code bridge is active and try again.';
+    }
+
+    return raw;
 }
 
 type PendingUserMessage = {
@@ -296,10 +451,16 @@ export default function CopilotConversationScreen() {
     const [lastSeenAssistantId, setLastSeenAssistantId] = React.useState<string | null>(null);
     const [previousRequestCursor, setPreviousRequestCursor] = React.useState(0);
     const [pendingUserMessages, setPendingUserMessages] = React.useState<PendingUserMessage[]>([]);
+    const [isScrolledToBottom, setIsScrolledToBottom] = React.useState(false);
     const listRef = React.useRef<FlatList<VscodeConversationMessage>>(null);
     const didInitialScrollRef = React.useRef(false);
     const pendingScrollTargetRef = React.useRef<{ index: number; viewPosition?: number } | null>(null);
     const latestAssistantIdRef = React.useRef<string | null>(null);
+    const listMetricsRef = React.useRef({
+        offsetY: 0,
+        viewportHeight: 0,
+        contentHeight: 0,
+    });
 
     const loadHistory = React.useCallback(async (options?: { silent?: boolean; suppressErrors?: boolean }) => {
         if (!resolvedMachineId || !resolvedInstanceId || !resolvedSessionId) return;
@@ -323,7 +484,7 @@ export default function CopilotConversationScreen() {
             if (!options?.suppressErrors) {
                 Modal.alert(
                     t('common.error'),
-                    error instanceof Error ? error.message : 'Failed to load Copilot conversation history.'
+                    getRpcFriendlyErrorMessage(error, 'Failed to load Copilot conversation history.')
                 );
             }
         } finally {
@@ -419,6 +580,12 @@ export default function CopilotConversationScreen() {
         setHasUnreadLatestResponse(false);
         setLastSeenAssistantId(null);
         setPreviousRequestCursor(0);
+        setIsScrolledToBottom(false);
+        listMetricsRef.current = {
+            offsetY: 0,
+            viewportHeight: 0,
+            contentHeight: 0,
+        };
     }, [resolvedMachineId, resolvedInstanceId, resolvedSessionId]);
 
     React.useEffect(() => {
@@ -507,6 +674,50 @@ export default function CopilotConversationScreen() {
         itemVisiblePercentThreshold: 30,
     });
 
+    const updateBottomState = React.useCallback(() => {
+        const metrics = listMetricsRef.current;
+        if (metrics.viewportHeight <= 0 || metrics.contentHeight <= 0) {
+            setIsScrolledToBottom(false);
+            return;
+        }
+        const bottomThreshold = 24;
+        const atBottom = metrics.contentHeight <= metrics.viewportHeight
+            || (metrics.offsetY + metrics.viewportHeight >= metrics.contentHeight - bottomThreshold);
+        setIsScrolledToBottom((previous) => (previous === atBottom ? previous : atBottom));
+    }, []);
+
+    const handleListScroll = React.useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+        listMetricsRef.current.offsetY = Math.max(0, event.nativeEvent.contentOffset.y);
+        listMetricsRef.current.viewportHeight = event.nativeEvent.layoutMeasurement.height;
+        listMetricsRef.current.contentHeight = event.nativeEvent.contentSize.height;
+        updateBottomState();
+    }, [updateBottomState]);
+
+    const handleListLayout = React.useCallback((event: LayoutChangeEvent) => {
+        listMetricsRef.current.viewportHeight = event.nativeEvent.layout.height;
+        updateBottomState();
+    }, [updateBottomState]);
+
+    const handleListContentSizeChange = React.useCallback((_width: number, height: number) => {
+        listMetricsRef.current.contentHeight = height;
+        updateBottomState();
+    }, [updateBottomState]);
+
+    const handleCopyMessage = React.useCallback(async (message: VscodeConversationMessage) => {
+        const text = getCopyTextForMessage(message);
+        if (text.length === 0) {
+            return;
+        }
+        try {
+            await Clipboard.setStringAsync(text);
+        } catch (error) {
+            Modal.alert(
+                t('common.error'),
+                error instanceof Error ? error.message : 'Failed to copy message.'
+            );
+        }
+    }, []);
+
     const handleRefresh = React.useCallback(async () => {
         setIsRefreshing(true);
         await loadHistory({ silent: true });
@@ -546,8 +757,16 @@ export default function CopilotConversationScreen() {
     }, [navigateToRequestCursor, currentPreviousRequestCursor]);
 
     const handleLastRequestPress = React.useCallback(() => {
+        if (previousUserIndexesForLatest.length === 0 || isScrolledToBottom) {
+            return;
+        }
+        const isOnLastRequest = currentPreviousRequestCursor >= previousUserIndexesForLatest.length - 1;
+        if (isOnLastRequest) {
+            listRef.current?.scrollToEnd({ animated: true });
+            return;
+        }
         navigateToRequestCursor(previousUserIndexesForLatest.length - 1);
-    }, [navigateToRequestCursor, previousUserIndexesForLatest.length]);
+    }, [navigateToRequestCursor, previousUserIndexesForLatest.length, currentPreviousRequestCursor, isScrolledToBottom]);
 
     const handleSend = React.useCallback(async () => {
         if (!resolvedMachineId || !resolvedInstanceId || !resolvedSessionId) return;
@@ -578,7 +797,7 @@ export default function CopilotConversationScreen() {
         } catch (error) {
             Modal.alert(
                 t('common.error'),
-                error instanceof Error ? error.message : t('machine.vscodeSendFailed')
+                getRpcFriendlyErrorMessage(error, t('machine.vscodeSendFailed'))
             );
             setInputText(message);
             setPendingUserMessages((previous) => previous.filter((pending) => pending.id !== optimisticMessage.id));
@@ -599,6 +818,7 @@ export default function CopilotConversationScreen() {
                 instanceId?: string;
                 id?: string;
                 workspaceDir?: string;
+                workspaceFile?: string;
             }>);
             const snapshotInstances = (((machine?.daemonState as any)?.vscode?.instances ?? []) as Array<{
                 instanceId?: string;
@@ -611,12 +831,14 @@ export default function CopilotConversationScreen() {
                 instance.instanceId === resolvedInstanceId
             );
             const workspaceDir = history?.session?.workspaceDir ?? matchingSession?.workspaceDir;
+            const workspaceFile = (history?.session as { workspaceFile?: string } | undefined)?.workspaceFile ?? matchingSession?.workspaceFile;
             const appTarget = matchingInstance?.appName?.toLowerCase().includes('insider') ? 'insiders' : 'vscode';
 
             const result = await machineOpenVscodeSession(resolvedMachineId, {
                 instanceId: resolvedInstanceId,
                 sessionId: resolvedSessionId,
                 workspaceDir,
+                workspaceFile,
                 newWindow: false,
                 appTarget,
             });
@@ -627,12 +849,12 @@ export default function CopilotConversationScreen() {
         } catch (error) {
             Modal.alert(
                 t('common.error'),
-                error instanceof Error ? error.message : 'Failed to open VS Code.'
+                getRpcFriendlyErrorMessage(error, 'Failed to open VS Code.')
             );
         } finally {
             setIsOpeningVscode(false);
         }
-    }, [resolvedMachineId, resolvedInstanceId, resolvedSessionId, machine?.daemonState, history?.session?.workspaceDir]);
+    }, [resolvedMachineId, resolvedInstanceId, resolvedSessionId, machine?.daemonState, history?.session?.workspaceDir, history?.session]);
 
     React.useEffect(() => {
         if (!awaitingResponseSince) {
@@ -671,10 +893,21 @@ export default function CopilotConversationScreen() {
         setPendingUserMessages((previous) => previous.filter((pending) => pending.timestamp >= cutoff));
     }, [messageCount]);
 
+    React.useEffect(() => {
+        const timeout = setTimeout(() => {
+            updateBottomState();
+        }, 0);
+        return () => clearTimeout(timeout);
+    }, [messageCount, updateBottomState]);
+
     const title = history?.session?.title || 'Copilot';
     const machineName = machine?.metadata?.displayName || machine?.metadata?.host || resolvedMachineId || '';
     const previousRequestPreview = previousUserMessageForLatest?.text?.replace(/\s+/g, ' ').trim() ?? '';
-    const latestIndicatorText = isReadingLatestResponse ? 'Viewing latest response' : 'Viewing history';
+    const workspacePathText = history?.session?.workspacePathDisplay
+        ?? history?.session?.workspaceDir
+        ?? history?.session?.workspaceFile
+        ?? 'Viewing history';
+    const latestIndicatorText = isReadingLatestResponse ? 'Viewing latest response' : workspacePathText;
     const latestIndicatorColor = hasUnreadLatestResponse
         ? theme.colors.button.primary.background
         : (isReadingLatestResponse ? theme.colors.success : theme.colors.textSecondary);
@@ -684,6 +917,7 @@ export default function CopilotConversationScreen() {
         : '';
     const canGoBackward = currentPreviousRequestCursor > 0;
     const canGoForward = currentPreviousRequestCursor < previousUserIndexesForLatest.length - 1;
+    const canJumpToEnd = previousUserIndexesForLatest.length > 0 && !isScrolledToBottom;
 
     return (
         <>
@@ -718,6 +952,10 @@ export default function CopilotConversationScreen() {
                     ref={listRef}
                     data={messages}
                     keyExtractor={(item) => item.id}
+                    onLayout={handleListLayout}
+                    onScroll={handleListScroll}
+                    onContentSizeChange={handleListContentSizeChange}
+                    scrollEventThrottle={16}
                     onScrollToIndexFailed={onScrollToIndexFailed}
                     onViewableItemsChanged={onViewableItemsChanged}
                     viewabilityConfig={viewabilityConfigRef.current}
@@ -733,14 +971,72 @@ export default function CopilotConversationScreen() {
                     )}
                     renderItem={({ item }) => {
                         const isUser = item.role === 'user';
+                        const copyText = getCopyTextForMessage(item);
+                        const hasCopyText = copyText.length > 0;
+                        const renderFileTreeNode = (node: VscodeConversationFileTreeNode, depth: number, keyPrefix: string): React.ReactNode => {
+                            const children = Array.isArray(node.children) ? node.children : [];
+                            const hasChildren = children.length > 0;
+                            return (
+                                <View key={`${keyPrefix}:${depth}:${node.label}`}>
+                                    <View style={[styles.fileTreeNodeRow, { paddingLeft: depth * 12 }]}>
+                                        <Ionicons
+                                            name={hasChildren ? 'folder-outline' : 'document-outline'}
+                                            size={12}
+                                            color={theme.colors.textSecondary}
+                                        />
+                                        <Text style={styles.fileTreeNodeLabel} numberOfLines={1}>
+                                            {node.label}
+                                        </Text>
+                                    </View>
+                                    {hasChildren
+                                        ? children.map((child, childIndex) =>
+                                            renderFileTreeNode(child, depth + 1, `${keyPrefix}:${childIndex}`))
+                                        : null}
+                                </View>
+                            );
+                        };
+
                         return (
                             <View style={[styles.messageRow, isUser ? styles.messageRowUser : styles.messageRowAssistant]}>
                                 <View style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleAssistant]}>
-                                    {isUser ? (
-                                        <Text style={styles.messageTextUser}>{item.text}</Text>
-                                    ) : (
-                                        <MarkdownView markdown={sanitizeAssistantMarkdown(item.text)} />
-                                    )}
+                                    <View style={styles.bubbleContent}>
+                                        {isUser ? (
+                                            <Text style={styles.messageTextUser}>{item.text}</Text>
+                                        ) : (
+                                            <>
+                                                {item.text.trim().length > 0 ? (
+                                                    <MarkdownView markdown={sanitizeAssistantMarkdown(item.text)} />
+                                                ) : null}
+                                                {Array.isArray(item.fileTrees) && item.fileTrees.length > 0
+                                                    ? item.fileTrees.map((tree, treeIndex) => (
+                                                        <View key={`${item.id}:tree:${treeIndex}`} style={styles.fileTreeContainer}>
+                                                            {tree.basePath ? (
+                                                                <Text style={styles.fileTreeBasePath}>
+                                                                    {tree.basePath}
+                                                                </Text>
+                                                            ) : null}
+                                                            {tree.roots.map((root, rootIndex) =>
+                                                                renderFileTreeNode(root, 0, `${item.id}:${treeIndex}:${rootIndex}`))}
+                                                        </View>
+                                                    ))
+                                                    : null}
+                                            </>
+                                        )}
+                                    </View>
+                                    <Pressable
+                                        style={[styles.messageCopyButton, !hasCopyText && styles.messageCopyButtonDisabled]}
+                                        onPress={() => {
+                                            void handleCopyMessage(item);
+                                        }}
+                                        disabled={!hasCopyText}
+                                        hitSlop={8}
+                                    >
+                                        <Ionicons
+                                            name="copy-outline"
+                                            size={12}
+                                            color={isUser ? theme.colors.button.primary.tint : theme.colors.textSecondary}
+                                        />
+                                    </Pressable>
                                     <Text style={[styles.timestamp, isUser && styles.timestampUser]}>
                                         {formatTimestamp(item.timestamp)}
                                     </Text>
@@ -755,9 +1051,6 @@ export default function CopilotConversationScreen() {
                         <View style={styles.requestNavigatorHeader}>
                             <View>
                                 <Text style={styles.requestNavigatorTitle}>Previous request</Text>
-                                {previousRequestMetaText.length > 0 && (
-                                    <Text style={styles.requestNavigatorMeta}>{previousRequestMetaText}</Text>
-                                )}
                             </View>
                             <Pressable
                                 style={styles.latestIndicator}
@@ -772,7 +1065,11 @@ export default function CopilotConversationScreen() {
                                 ) : (
                                     <>
                                         <View style={[styles.latestIndicatorDot, { backgroundColor: latestIndicatorColor }]} />
-                                        <Text style={[styles.latestIndicatorText, { color: latestIndicatorColor }]}>
+                                        <Text
+                                            style={[styles.latestIndicatorText, { color: latestIndicatorColor }]}
+                                            numberOfLines={1}
+                                            ellipsizeMode="middle"
+                                        >
                                             {hasUnreadLatestResponse ? 'New response available' : latestIndicatorText}
                                         </Text>
                                     </>
@@ -813,9 +1110,9 @@ export default function CopilotConversationScreen() {
                                 <Ionicons name="chevron-forward" size={16} color={theme.colors.text} />
                             </Pressable>
                             <Pressable
-                                style={[styles.requestControlButton, !canGoForward && styles.requestControlButtonDisabled]}
+                                style={[styles.requestControlButton, !canJumpToEnd && styles.requestControlButtonDisabled]}
                                 onPress={handleLastRequestPress}
-                                disabled={!canGoForward}
+                                disabled={!canJumpToEnd}
                                 hitSlop={10}
                             >
                                 <Ionicons name="play-skip-forward" size={14} color={theme.colors.text} />

@@ -22,6 +22,7 @@ class Configuration {
   public readonly privateKeyFile: string
   public readonly daemonStateFile: string
   public readonly daemonLockFile: string
+  public readonly globalDaemonLockFile: string
   public readonly currentCliVersion: string
 
   public readonly isExperimentalEnabled: boolean
@@ -50,6 +51,8 @@ class Configuration {
     this.privateKeyFile = join(this.happyHomeDir, 'access.key')
     this.daemonStateFile = join(this.happyHomeDir, 'daemon.state.json')
     this.daemonLockFile = join(this.happyHomeDir, 'daemon.state.json.lock')
+    // Host-wide mutex to prevent multiple daemons across different HAPPY_HOME_DIR values.
+    this.globalDaemonLockFile = join(homedir(), '.happy-daemon.global.lock')
 
     this.isExperimentalEnabled = ['true', '1', 'yes'].includes(process.env.HAPPY_EXPERIMENTAL?.toLowerCase() || '');
     this.disableCaffeinate = ['true', '1', 'yes'].includes(process.env.HAPPY_DISABLE_CAFFEINATE?.toLowerCase() || '');

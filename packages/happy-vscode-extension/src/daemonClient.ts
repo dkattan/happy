@@ -19,6 +19,7 @@ export type VscodeSessionSummary = {
   source: 'workspace' | 'empty-window';
   workspaceId?: string;
   workspaceDir?: string;
+  workspacePathDisplay?: string;
   displayName?: string;
   jsonPath: string;
 };
@@ -44,6 +45,17 @@ export type VscodeConversationMessage = {
   role: 'user' | 'assistant';
   text: string;
   timestamp: number;
+  fileTrees?: VscodeConversationFileTree[];
+};
+
+export type VscodeConversationFileTreeNode = {
+  label: string;
+  children?: VscodeConversationFileTreeNode[];
+};
+
+export type VscodeConversationFileTree = {
+  basePath?: string;
+  roots: VscodeConversationFileTreeNode[];
 };
 
 export type DaemonClientConfig = {

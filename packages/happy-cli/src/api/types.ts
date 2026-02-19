@@ -205,8 +205,46 @@ export const VscodeSessionSummarySchema = z.object({
   source: z.union([z.literal('workspace'), z.literal('empty-window')]),
   workspaceId: z.string().optional(),
   workspaceDir: z.string().optional(),
+  workspaceFile: z.string().optional(),
+  workspacePathDisplay: z.string().optional(),
   displayName: z.string().optional(),
   jsonPath: z.string()
+});
+
+export const VscodeFlatSessionSummarySchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  lastMessageDate: z.number(),
+  needsInput: z.boolean(),
+  source: z.union([z.literal('workspace'), z.literal('empty-window')]),
+  workspaceId: z.string().optional(),
+  workspaceDir: z.string().optional(),
+  workspaceFile: z.string().optional(),
+  workspacePathDisplay: z.string().optional(),
+  displayName: z.string().optional(),
+  jsonPath: z.string(),
+  appTarget: z.union([z.literal('vscode'), z.literal('insiders')]),
+  appName: z.string(),
+  instanceId: z.string().optional(),
+  instanceLabel: z.string().optional(),
+  workspaceOpen: z.boolean(),
+  seenInLive: z.boolean(),
+  seenOnDisk: z.boolean()
+});
+
+export const VscodeRecentWorkspaceSchema = z.object({
+  id: z.string(),
+  appTarget: z.union([z.literal('vscode'), z.literal('insiders')]),
+  appName: z.string(),
+  kind: z.union([z.literal('folder'), z.literal('workspace-file')]),
+  path: z.string(),
+  label: z.string(),
+  recentRank: z.number(),
+  workspaceOpen: z.boolean(),
+  instanceId: z.string().optional(),
+  lastActivityAt: z.number().optional(),
+  seenInLive: z.boolean(),
+  seenOnDisk: z.boolean()
 });
 
 export const VscodeInstanceSummarySchema = z.object({
@@ -223,6 +261,8 @@ export const VscodeInstanceSummarySchema = z.object({
 export const VscodeBridgeSnapshotSchema = z.object({
   instances: z.array(VscodeInstanceSummarySchema),
   sessions: z.array(VscodeSessionSummarySchema),
+  flatSessions: z.array(VscodeFlatSessionSummarySchema).optional(),
+  recentWorkspaces: z.array(VscodeRecentWorkspaceSchema).optional(),
   needsInputCount: z.number(),
   updatedAt: z.number()
 });

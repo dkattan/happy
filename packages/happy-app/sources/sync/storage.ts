@@ -61,7 +61,12 @@ export type SessionListViewItem =
     | { type: 'active-sessions'; sessions: Session[] }
     | { type: 'project-group'; displayPath: string; machine: Machine }
     | { type: 'session'; session: Session; variant?: 'default' | 'no-path' }
-    | { type: 'copilot-sessions'; conversations: CopilotConversationListItem[] };
+    | {
+        type: 'copilot-sessions';
+        conversations: CopilotConversationListItem[];
+        flatConversations: CopilotFlatConversationListItem[];
+        recentWorkspaces: CopilotRecentWorkspaceListItem[];
+    };
 
 interface VscodeBridgeSessionSummary {
     instanceId: string;
@@ -72,8 +77,44 @@ interface VscodeBridgeSessionSummary {
     source: 'workspace' | 'empty-window';
     workspaceId?: string;
     workspaceDir?: string;
+    workspaceFile?: string;
     displayName?: string;
     jsonPath: string;
+}
+
+interface VscodeBridgeFlatSessionSummary {
+    id: string;
+    title: string;
+    lastMessageDate: number;
+    needsInput: boolean;
+    source: 'workspace' | 'empty-window';
+    workspaceId?: string;
+    workspaceDir?: string;
+    workspaceFile?: string;
+    displayName?: string;
+    jsonPath: string;
+    appTarget: 'vscode' | 'insiders';
+    appName: string;
+    instanceId?: string;
+    instanceLabel?: string;
+    workspaceOpen: boolean;
+    seenInLive: boolean;
+    seenOnDisk: boolean;
+}
+
+interface VscodeBridgeRecentWorkspaceSummary {
+    id: string;
+    appTarget: 'vscode' | 'insiders';
+    appName: string;
+    kind: 'folder' | 'workspace-file';
+    path: string;
+    label: string;
+    recentRank: number;
+    workspaceOpen: boolean;
+    instanceId?: string;
+    lastActivityAt?: number;
+    seenInLive: boolean;
+    seenOnDisk: boolean;
 }
 
 interface VscodeBridgeInstanceSummary {
@@ -93,6 +134,18 @@ export interface CopilotConversationListItem {
     session: VscodeBridgeSessionSummary;
 }
 
+export interface CopilotFlatConversationListItem {
+    machine: Machine;
+    instance: VscodeBridgeInstanceSummary | null;
+    session: VscodeBridgeFlatSessionSummary;
+}
+
+export interface CopilotRecentWorkspaceListItem {
+    machine: Machine;
+    instance: VscodeBridgeInstanceSummary | null;
+    workspace: VscodeBridgeRecentWorkspaceSummary;
+}
+
 function isContextScopedInstance(instance: VscodeBridgeInstanceSummary | null): boolean {
     if (!instance) return false;
     return Boolean(instance.workspaceFile) || (Array.isArray(instance.workspaceFolders) && instance.workspaceFolders.length > 0);
@@ -107,6 +160,37 @@ function scoreConversationOwnership(
         return scoped ? 2 : 1;
     }
     return scoped ? 0 : 2;
+}
+
+function compareRecentWorkspaceSummary(
+    a: VscodeBridgeRecentWorkspaceSummary,
+    b: VscodeBridgeRecentWorkspaceSummary
+): number {
+    const appOrder: Record<'vscode' | 'insiders', number> = {
+        vscode: 0,
+        insiders: 1,
+    };
+
+    const activityDelta = (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0);
+    if (activityDelta !== 0) {
+        return activityDelta;
+    }
+
+    const rankDelta = (a.recentRank ?? Number.MAX_SAFE_INTEGER) - (b.recentRank ?? Number.MAX_SAFE_INTEGER);
+    if (rankDelta !== 0) {
+        return rankDelta;
+    }
+
+    if (a.workspaceOpen !== b.workspaceOpen) {
+        return Number(b.workspaceOpen) - Number(a.workspaceOpen);
+    }
+
+    const appDelta = (appOrder[a.appTarget] ?? 99) - (appOrder[b.appTarget] ?? 99);
+    if (appDelta !== 0) {
+        return appDelta;
+    }
+
+    return a.label.localeCompare(b.label);
 }
 
 // Legacy type for backward compatibility - to be removed
@@ -219,14 +303,20 @@ function buildSessionListViewData(
     const listData: SessionListViewItem[] = [];
 
     const copilotConversationsByKey = new Map<string, CopilotConversationListItem>();
+    const copilotFlatConversationsByKey = new Map<string, CopilotFlatConversationListItem>();
+    const copilotRecentWorkspacesByKey = new Map<string, CopilotRecentWorkspaceListItem>();
     Object.values(machines).forEach((machine) => {
         const vscodeState = (machine.daemonState as {
             vscode?: {
                 instances?: VscodeBridgeInstanceSummary[];
                 sessions?: VscodeBridgeSessionSummary[];
+                flatSessions?: VscodeBridgeFlatSessionSummary[];
+                recentWorkspaces?: VscodeBridgeRecentWorkspaceSummary[];
             };
         } | null)?.vscode;
         const vscodeSessions = vscodeState?.sessions ?? [];
+        const vscodeFlatSessions = vscodeState?.flatSessions ?? [];
+        const vscodeRecentWorkspaces = vscodeState?.recentWorkspaces ?? [];
         const vscodeInstances = vscodeState?.instances ?? [];
         const instancesById = new Map<string, VscodeBridgeInstanceSummary>();
 
@@ -267,9 +357,79 @@ function buildSessionListViewData(
                 copilotConversationsByKey.set(dedupeKey, next);
             }
         });
+
+        if (Array.isArray(vscodeFlatSessions)) {
+            vscodeFlatSessions.forEach((vscodeSession) => {
+                const dedupeKey = `${machine.id}:${vscodeSession.appTarget}:${vscodeSession.id}:${vscodeSession.jsonPath}`;
+                const next: CopilotFlatConversationListItem = {
+                    machine,
+                    instance: vscodeSession.instanceId ? (instancesById.get(vscodeSession.instanceId) ?? null) : null,
+                    session: vscodeSession,
+                };
+
+                const existing = copilotFlatConversationsByKey.get(dedupeKey);
+                if (!existing) {
+                    copilotFlatConversationsByKey.set(dedupeKey, next);
+                    return;
+                }
+
+                if (existing.session.workspaceOpen !== next.session.workspaceOpen) {
+                    if (next.session.workspaceOpen) {
+                        copilotFlatConversationsByKey.set(dedupeKey, next);
+                    }
+                    return;
+                }
+
+                if (existing.session.needsInput !== next.session.needsInput) {
+                    if (next.session.needsInput) {
+                        copilotFlatConversationsByKey.set(dedupeKey, next);
+                    }
+                    return;
+                }
+
+                if ((next.session.lastMessageDate ?? 0) > (existing.session.lastMessageDate ?? 0)) {
+                    copilotFlatConversationsByKey.set(dedupeKey, next);
+                }
+            });
+        }
+
+        if (Array.isArray(vscodeRecentWorkspaces)) {
+            vscodeRecentWorkspaces.forEach((workspace) => {
+                const dedupeKey = `${machine.id}:${workspace.appTarget}:${workspace.kind}:${workspace.path}`;
+                const next: CopilotRecentWorkspaceListItem = {
+                    machine,
+                    instance: workspace.instanceId ? (instancesById.get(workspace.instanceId) ?? null) : null,
+                    workspace,
+                };
+
+                const existing = copilotRecentWorkspacesByKey.get(dedupeKey);
+                if (!existing) {
+                    copilotRecentWorkspacesByKey.set(dedupeKey, next);
+                    return;
+                }
+                const existingActivity = existing.workspace.lastActivityAt ?? 0;
+                const nextActivity = next.workspace.lastActivityAt ?? 0;
+                const existingRank = existing.workspace.recentRank ?? Number.MAX_SAFE_INTEGER;
+                const nextRank = next.workspace.recentRank ?? Number.MAX_SAFE_INTEGER;
+
+                if (!existing.workspace.workspaceOpen && next.workspace.workspaceOpen) {
+                    copilotRecentWorkspacesByKey.set(dedupeKey, next);
+                    return;
+                }
+                if (nextActivity > existingActivity) {
+                    copilotRecentWorkspacesByKey.set(dedupeKey, next);
+                    return;
+                }
+                if (nextActivity === existingActivity && nextRank < existingRank) {
+                    copilotRecentWorkspacesByKey.set(dedupeKey, next);
+                }
+            });
+        }
     });
 
     const copilotConversations = Array.from(copilotConversationsByKey.values());
+    const copilotFlatConversations = Array.from(copilotFlatConversationsByKey.values());
+    const copilotRecentWorkspaces = Array.from(copilotRecentWorkspacesByKey.values());
 
     copilotConversations.sort((a, b) => {
         if (a.session.needsInput !== b.session.needsInput) {
@@ -278,13 +438,32 @@ function buildSessionListViewData(
         return (b.session.lastMessageDate ?? 0) - (a.session.lastMessageDate ?? 0);
     });
 
+    copilotFlatConversations.sort((a, b) => {
+        if (a.session.workspaceOpen !== b.session.workspaceOpen) {
+            return Number(b.session.workspaceOpen) - Number(a.session.workspaceOpen);
+        }
+        if (a.session.needsInput !== b.session.needsInput) {
+            return Number(b.session.needsInput) - Number(a.session.needsInput);
+        }
+        return (b.session.lastMessageDate ?? 0) - (a.session.lastMessageDate ?? 0);
+    });
+
+    copilotRecentWorkspaces.sort((a, b) => {
+        return compareRecentWorkspaceSummary(a.workspace, b.workspace);
+    });
+
     // Add active sessions as a single item at the top (if any)
     if (activeSessions.length > 0) {
         listData.push({ type: 'active-sessions', sessions: activeSessions });
     }
 
-    if (copilotConversations.length > 0) {
-        listData.push({ type: 'copilot-sessions', conversations: copilotConversations });
+    if (copilotConversations.length > 0 || copilotFlatConversations.length > 0 || copilotRecentWorkspaces.length > 0) {
+        listData.push({
+            type: 'copilot-sessions',
+            conversations: copilotConversations,
+            flatConversations: copilotFlatConversations,
+            recentWorkspaces: copilotRecentWorkspaces,
+        });
     }
 
     // Group inactive sessions by date
@@ -1236,6 +1415,14 @@ export function useSetting<K extends keyof Settings>(name: K): Settings[K] {
 
 export function useLocalSettings(): LocalSettings {
     return storage(useShallow((state) => state.localSettings));
+}
+
+export function useKnownMachines(): Machine[] {
+    return storage(useShallow((state) => {
+        if (!state.isDataReady) return [];
+        return Object.values(state.machines)
+            .sort((a, b) => (b.activeAt || 0) - (a.activeAt || 0) || b.createdAt - a.createdAt);
+    }));
 }
 
 export function useAllMachines(): Machine[] {

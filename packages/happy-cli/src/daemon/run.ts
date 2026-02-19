@@ -14,7 +14,7 @@ import { startCaffeinate, stopCaffeinate } from '@/utils/caffeinate';
 import packageJson from '../../package.json';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
-import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock, readSettings, getActiveProfile, getEnvironmentVariables, validateProfileForAgent, getProfileEnvironmentVariables } from '@/persistence';
+import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock, acquireGlobalDaemonLock, releaseGlobalDaemonLock, readSettings, getActiveProfile, getEnvironmentVariables, validateProfileForAgent, getProfileEnvironmentVariables } from '@/persistence';
 
 import { cleanupDaemonState, isDaemonRunningCurrentlyInstalledHappyVersion, stopDaemon } from './controlClient';
 import { startDaemonControlServer } from './controlServer';
@@ -145,10 +145,18 @@ export async function startDaemon(): Promise<void> {
     process.exit(0);
   }
 
-  // Acquire exclusive lock (proves daemon is running)
+  // Acquire host-wide lock first to prevent parallel daemons across variants/homes.
+  const globalDaemonLockHandle = await acquireGlobalDaemonLock(5, 200);
+  if (!globalDaemonLockHandle) {
+    logger.debug('[DAEMON RUN] Global daemon lock already held, another daemon is running');
+    process.exit(0);
+  }
+
+  // Acquire local lock (proves daemon is running for current HAPPY_HOME_DIR)
   const daemonLockHandle = await acquireDaemonLock(5, 200);
   if (!daemonLockHandle) {
     logger.debug('[DAEMON RUN] Daemon lock file already held, another daemon is running');
+    await releaseGlobalDaemonLock(globalDaemonLockHandle);
     process.exit(0);
   }
 
@@ -819,6 +827,27 @@ export async function startDaemon(): Promise<void> {
           logger.debug('[DAEMON RUN] Failed to launch VS Code', { message });
           throw new Error(`Failed to launch VS Code: ${message}`);
         }
+      },
+      search: (params: {
+        query?: string;
+        entity: 'sessions' | 'workspaces' | 'both';
+        appTarget?: 'vscode' | 'insiders';
+        appTargets?: Array<'vscode' | 'insiders'>;
+        includeOpen?: boolean;
+        includeClosed?: boolean;
+        source?: {
+          live?: boolean;
+          disk?: boolean;
+        };
+        recency?: {
+          since?: number;
+          until?: number;
+          lastDays?: number;
+        };
+        textMode?: 'contains' | 'regex';
+        limit?: number;
+      }) => {
+        return vscodeBridge.search(params);
       }
     });
 
@@ -940,6 +969,7 @@ export async function startDaemon(): Promise<void> {
       await cleanupDaemonState();
       await stopCaffeinate();
       await releaseDaemonLock(daemonLockHandle);
+      await releaseGlobalDaemonLock(globalDaemonLockHandle);
 
       logger.debug('[DAEMON RUN] Cleanup completed, exiting process');
       process.exit(0);

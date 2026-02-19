@@ -60,6 +60,7 @@ type VscodeSessionSummary = {
     source: 'workspace' | 'empty-window';
     workspaceId?: string;
     workspaceDir?: string;
+    workspaceFile?: string;
     displayName?: string;
     jsonPath: string;
 };
@@ -314,6 +315,16 @@ function NewSessionWizard() {
         return [...builtInProfiles, ...profiles];
     }, [profiles]);
 
+    // Experimental first-launch support: when experiments are enabled and the user has never
+    // launched with a saved profile yet, default to the profile-first wizard once.
+    const shouldUseEnhancedSessionWizard = React.useMemo(() => {
+        if (useEnhancedSessionWizard) {
+            return true;
+        }
+        const isProfileFirstLaunch = experimentsEnabled && !lastUsedProfile;
+        return isProfileFirstLaunch;
+    }, [useEnhancedSessionWizard, experimentsEnabled, lastUsedProfile]);
+
     const profileMap = useProfileMap(allProfiles);
     const machines = useAllMachines();
     const sessions = useSessions();
@@ -399,17 +410,34 @@ function NewSessionWizard() {
 
     // Session details state
     const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(() => {
-        if (machines.length > 0) {
-            if (recentMachinePaths.length > 0) {
-                for (const recent of recentMachinePaths) {
-                    if (machines.find(m => m.id === recent.machineId)) {
-                        return recent.machineId;
-                    }
+        if (machines.length === 0) {
+            return null;
+        }
+
+        const onlineMachines = machines
+            .filter((machine) => isMachineOnline(machine))
+            .sort((a, b) => (b.activeAt || 0) - (a.activeAt || 0));
+        const onlineMachineIds = new Set(onlineMachines.map((machine) => machine.id));
+
+        if (recentMachinePaths.length > 0) {
+            for (const recent of recentMachinePaths) {
+                if (onlineMachineIds.has(recent.machineId)) {
+                    return recent.machineId;
                 }
             }
-            return machines[0].id;
+
+            for (const recent of recentMachinePaths) {
+                if (machines.find(m => m.id === recent.machineId)) {
+                    return recent.machineId;
+                }
+            }
         }
-        return null;
+
+        if (onlineMachines.length > 0) {
+            return onlineMachines[0].id;
+        }
+
+        return machines[0].id;
     });
 
     const handlePermissionModeChange = React.useCallback((mode: PermissionMode) => {
@@ -471,6 +499,11 @@ function NewSessionWizard() {
         if (!selectedMachineId) return null;
         return machines.find(m => m.id === selectedMachineId);
     }, [selectedMachineId, machines]);
+    const onlineMachines = React.useMemo(() => {
+        return [...machines]
+            .filter((machine) => isMachineOnline(machine))
+            .sort((a, b) => (b.activeAt || 0) - (a.activeAt || 0));
+    }, [machines]);
 
     const vscodeSessions = React.useMemo(() => {
         const snapshot = (selectedMachine?.daemonState as any)?.vscode as { sessions?: VscodeSessionSummary[] } | undefined;
@@ -1012,8 +1045,20 @@ function NewSessionWizard() {
     }, [profiles, setProfiles]);
 
     const handleMachineClick = React.useCallback(() => {
-        router.push('/new/pick/machine');
-    }, [router]);
+        const connectedMachine = onlineMachines[0];
+        if (onlineMachines.length === 1 && connectedMachine) {
+            const connectedMachineId = connectedMachine.id;
+            setSelectedMachineId(connectedMachineId);
+            const bestPath = getRecentPathForMachine(connectedMachineId, recentMachinePaths);
+            setSelectedPath(bestPath);
+            return;
+        }
+
+        const selectedId = selectedMachineId ? encodeURIComponent(selectedMachineId) : '';
+        router.push((selectedId
+            ? `/new/pick/machine?selectedId=${selectedId}`
+            : '/new/pick/machine') as any);
+    }, [onlineMachines, recentMachinePaths, router, selectedMachineId]);
 
     const handlePathClick = React.useCallback(() => {
         if (selectedMachineId) {
@@ -1264,7 +1309,7 @@ function NewSessionWizard() {
     // CONTROL A: Simpler AgentInput-driven layout (flag OFF)
     // Shows machine/path selection via chips that navigate to picker screens
     // ========================================================================
-    if (!useEnhancedSessionWizard) {
+    if (!shouldUseEnhancedSessionWizard) {
         return (
             <KeyboardAvoidingView
                 behavior={Platform.OS === 'ios' ? 'padding' : 'height'}

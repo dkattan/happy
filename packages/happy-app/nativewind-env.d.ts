@@ -1,1 +1,1 @@
-/// <reference types="nativewind/types" />
+// NativeWind is not configured in this workspace.

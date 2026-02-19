@@ -249,11 +249,95 @@ export async function machineOpenVscodeSession(
     return result;
 }
 
+export interface VscodeSearchFlatSession {
+    id: string;
+    title: string;
+    lastMessageDate: number;
+    needsInput: boolean;
+    source: 'workspace' | 'empty-window';
+    workspaceId?: string;
+    workspaceDir?: string;
+    workspaceFile?: string;
+    displayName?: string;
+    jsonPath: string;
+    appTarget: VscodeAppTarget;
+    appName: string;
+    instanceId?: string;
+    instanceLabel?: string;
+    workspaceOpen: boolean;
+    seenInLive: boolean;
+    seenOnDisk: boolean;
+}
+
+export interface VscodeSearchRecentWorkspace {
+    id: string;
+    appTarget: VscodeAppTarget;
+    appName: string;
+    kind: 'folder' | 'workspace-file';
+    path: string;
+    label: string;
+    recentRank: number;
+    workspaceOpen: boolean;
+    instanceId?: string;
+    lastActivityAt?: number;
+    seenInLive: boolean;
+    seenOnDisk: boolean;
+}
+
+export interface MachineSearchParams {
+    query?: string;
+    entity: 'sessions' | 'workspaces' | 'both';
+    appTarget?: VscodeAppTarget;
+    appTargets?: VscodeAppTarget[];
+    includeOpen?: boolean;
+    includeClosed?: boolean;
+    source?: {
+        live?: boolean;
+        disk?: boolean;
+    };
+    recency?: {
+        since?: number;
+        until?: number;
+        lastDays?: number;
+    };
+    textMode?: 'contains' | 'regex';
+    limit?: number;
+}
+
+export async function machineSearch(
+    machineId: string,
+    params: MachineSearchParams
+): Promise<{
+    flatSessions?: VscodeSearchFlatSession[];
+    recentWorkspaces?: VscodeSearchRecentWorkspace[];
+}> {
+    const result = await apiSocket.machineRPC<{
+        flatSessions?: VscodeSearchFlatSession[];
+        recentWorkspaces?: VscodeSearchRecentWorkspace[];
+    }, MachineSearchParams>(
+        machineId,
+        'search',
+        params
+    );
+    return result;
+}
+
 export interface VscodeConversationMessage {
     id: string;
     role: 'user' | 'assistant';
     text: string;
     timestamp: number;
+    fileTrees?: VscodeConversationFileTree[];
+}
+
+export interface VscodeConversationFileTreeNode {
+    label: string;
+    children?: VscodeConversationFileTreeNode[];
+}
+
+export interface VscodeConversationFileTree {
+    basePath?: string;
+    roots: VscodeConversationFileTreeNode[];
 }
 
 export interface VscodeConversationHistory {
@@ -266,6 +350,8 @@ export interface VscodeConversationHistory {
         source: 'workspace' | 'empty-window';
         workspaceId?: string;
         workspaceDir?: string;
+        workspaceFile?: string;
+        workspacePathDisplay?: string;
         displayName?: string;
         jsonPath: string;
     };

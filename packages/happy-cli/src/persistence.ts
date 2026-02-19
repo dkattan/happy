@@ -530,11 +530,33 @@ export async function acquireDaemonLock(
   maxAttempts: number = 5,
   delayIncrementMs: number = 200
 ): Promise<FileHandle | null> {
+  return acquireLockFile(configuration.daemonLockFile, maxAttempts, delayIncrementMs);
+}
+
+/**
+ * Acquire a host-wide daemon mutex lock.
+ * Prevents concurrent daemons across different HAPPY_HOME_DIR variants.
+ */
+export async function acquireGlobalDaemonLock(
+  maxAttempts: number = 5,
+  delayIncrementMs: number = 200
+): Promise<FileHandle | null> {
+  return acquireLockFile(configuration.globalDaemonLockFile, maxAttempts, delayIncrementMs);
+}
+
+/**
+ * Acquire an exclusive lock file at a specific path.
+ */
+async function acquireLockFile(
+  lockFilePath: string,
+  maxAttempts: number,
+  delayIncrementMs: number
+): Promise<FileHandle | null> {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       // O_EXCL ensures we only create if it doesn't exist (atomic lock acquisition)
       const fileHandle = await open(
-        configuration.daemonLockFile,
+        lockFilePath,
         constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY
       );
       // Write PID to lock file for debugging
@@ -544,13 +566,13 @@ export async function acquireDaemonLock(
       if (error.code === 'EEXIST') {
         // Lock file exists, check if process is still running
         try {
-          const lockPid = readFileSync(configuration.daemonLockFile, 'utf-8').trim();
+          const lockPid = readFileSync(lockFilePath, 'utf-8').trim();
           if (lockPid && !isNaN(Number(lockPid))) {
             try {
               process.kill(Number(lockPid), 0); // Check if process exists
             } catch {
               // Process doesn't exist, remove stale lock
-              unlinkSync(configuration.daemonLockFile);
+              unlinkSync(lockFilePath);
               continue; // Retry acquisition
             }
           }
@@ -573,13 +595,27 @@ export async function acquireDaemonLock(
  * Release daemon lock by closing handle and deleting lock file
  */
 export async function releaseDaemonLock(lockHandle: FileHandle): Promise<void> {
+  await releaseLockFile(lockHandle, configuration.daemonLockFile);
+}
+
+/**
+ * Release host-wide daemon mutex lock.
+ */
+export async function releaseGlobalDaemonLock(lockHandle: FileHandle): Promise<void> {
+  await releaseLockFile(lockHandle, configuration.globalDaemonLockFile);
+}
+
+/**
+ * Release a lock file by closing handle and deleting file.
+ */
+async function releaseLockFile(lockHandle: FileHandle, lockFilePath: string): Promise<void> {
   try {
     await lockHandle.close();
   } catch { }
 
   try {
-    if (existsSync(configuration.daemonLockFile)) {
-      unlinkSync(configuration.daemonLockFile);
+    if (existsSync(lockFilePath)) {
+      unlinkSync(lockFilePath);
     }
   } catch { }
 }
@@ -704,4 +740,3 @@ export async function getEnvironmentVariable(profileId: string, key: string): Pr
 
   return undefined;
 }
-

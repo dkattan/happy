@@ -17,6 +17,14 @@ export interface SyncSocketState {
     lastError: Error | null;
 }
 
+export interface SyncSocketDebugInfo {
+    endpoint: string | null;
+    status: 'disconnected' | 'connecting' | 'connected' | 'error';
+    socketId: string | null;
+    transport: string | null;
+    connected: boolean;
+}
+
 export type SyncSocketListener = (state: SyncSocketState) => void;
 
 //
@@ -95,6 +103,16 @@ class ApiSocket {
         return () => this.statusListeners.delete(listener);
     };
 
+    getDebugInfo(): SyncSocketDebugInfo {
+        return {
+            endpoint: this.config?.endpoint ?? null,
+            status: this.currentStatus,
+            socketId: this.socket?.id ?? null,
+            transport: this.socket?.io?.engine?.transport?.name ?? null,
+            connected: this.socket?.connected ?? false,
+        };
+    }
+
     //
     // Message Handling
     //
@@ -112,40 +130,50 @@ class ApiSocket {
      * RPC call for sessions - uses session-specific encryption
      */
     async sessionRPC<R, A>(sessionId: string, method: string, params: A): Promise<R> {
+        if (!this.socket) {
+            throw new Error('Socket not connected');
+        }
+
         const sessionEncryption = this.encryption!.getSessionEncryption(sessionId);
         if (!sessionEncryption) {
             throw new Error(`Session encryption not found for ${sessionId}`);
         }
-        
-        const result = await this.socket!.emitWithAck('rpc-call', {
-            method: `${sessionId}:${method}`,
-            params: await sessionEncryption.encryptRaw(params)
-        });
+
+        const result = await this.callRpcWithRetry(
+            `${sessionId}:${method}`,
+            await sessionEncryption.encryptRaw(params)
+        );
         
         if (result.ok) {
             return await sessionEncryption.decryptRaw(result.result) as R;
         }
-        throw new Error('RPC call failed');
+
+        throw new Error(this.getRpcErrorMessage(result));
     }
 
     /**
      * RPC call for machines - uses legacy/global encryption (for now)
      */
     async machineRPC<R, A>(machineId: string, method: string, params: A): Promise<R> {
+        if (!this.socket) {
+            throw new Error('Socket not connected');
+        }
+
         const machineEncryption = this.encryption!.getMachineEncryption(machineId);
         if (!machineEncryption) {
             throw new Error(`Machine encryption not found for ${machineId}`);
         }
 
-        const result = await this.socket!.emitWithAck('rpc-call', {
-            method: `${machineId}:${method}`,
-            params: await machineEncryption.encryptRaw(params)
-        });
+        const result = await this.callRpcWithRetry(
+            `${machineId}:${method}`,
+            await machineEncryption.encryptRaw(params)
+        );
 
         if (result.ok) {
             return await machineEncryption.decryptRaw(result.result) as R;
         }
-        throw new Error('RPC call failed');
+
+        throw new Error(this.getRpcErrorMessage(result));
     }
 
     send(event: string, data: any) {
@@ -233,7 +261,8 @@ class ApiSocket {
         // Error events
         this.socket.on('connect_error', (error) => {
             // console.error('🔌 SyncSocket: Connection error', error);
-            this.updateStatus('error');
+            // Connection can fail transiently during startup; keep reconnecting state.
+            this.updateStatus('connecting');
         });
 
         this.socket.on('error', (error) => {
@@ -252,6 +281,40 @@ class ApiSocket {
                 // console.log(`📥 SyncSocket: No handler registered for '${event}'`);
             }
         });
+    }
+
+    private async callRpcWithRetry(method: string, params: string): Promise<any> {
+        if (!this.socket) {
+            throw new Error('Socket not connected');
+        }
+
+        const firstAttempt = await this.socket.emitWithAck('rpc-call', { method, params });
+        if (firstAttempt?.ok || !this.isRpcMethodUnavailable(firstAttempt)) {
+            return firstAttempt;
+        }
+
+        // Give daemon reconnection/handler registration a brief window, then retry once.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+
+        if (!this.socket) {
+            throw new Error('Socket not connected');
+        }
+
+        return await this.socket.emitWithAck('rpc-call', { method, params });
+    }
+
+    private getRpcErrorMessage(result: unknown): string {
+        if (result && typeof result === 'object') {
+            const maybeError = (result as { error?: unknown }).error;
+            if (typeof maybeError === 'string' && maybeError.trim().length > 0) {
+                return maybeError;
+            }
+        }
+        return 'RPC call failed';
+    }
+
+    private isRpcMethodUnavailable(result: unknown): boolean {
+        return this.getRpcErrorMessage(result).toLowerCase().includes('rpc method not available');
     }
 }
 

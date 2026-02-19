@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HAPPY_DEV_HOME="${HAPPY_DEV_HOME:-$HOME/.happy-dev}"
 IOS_BUNDLE_ID="${IOS_BUNDLE_ID:-net.immense.happy.dev}"
 HAPPY_METRO_PORT="${HAPPY_METRO_PORT:-8081}"
+HAPPY_EXPO_HOST="${HAPPY_EXPO_HOST:-localhost}"
 HAPPY_FORCE_IOS_REBUILD="${HAPPY_FORCE_IOS_REBUILD:-0}"
 HAPPY_CHAT_SEND_TARGET="${HAPPY_CHAT_SEND_TARGET:-panel}"
 HAPPY_VSCODE_USER_DATA_DIR="${HAPPY_VSCODE_USER_DATA_DIR:-}"
@@ -247,6 +248,17 @@ launch_installed_ios_app_and_open_dev_url() {
   xcrun simctl openurl booted "$dev_client_url" >/dev/null 2>&1 || true
 }
 
+start_expo_dev_server() {
+  local metro_port="$1"
+
+  if [[ "$HAPPY_EXPO_HOST" == "tunnel" ]]; then
+    yarn --cwd "$ROOT_DIR/packages/happy-app" start:dev --dev-client --tunnel --port "$metro_port"
+    return
+  fi
+
+  yarn --cwd "$ROOT_DIR/packages/happy-app" start:dev --dev-client --host "$HAPPY_EXPO_HOST" --port "$metro_port"
+}
+
 resolve_available_metro_port() {
   local preferred_port="$1"
   node -e '
@@ -338,10 +350,17 @@ if ! command -v yarn >/dev/null 2>&1; then
   exit 1
 fi
 
+if [[ "$HAPPY_EXPO_HOST" != "localhost" && "$HAPPY_EXPO_HOST" != "lan" && "$HAPPY_EXPO_HOST" != "tunnel" ]]; then
+  echo "Invalid HAPPY_EXPO_HOST: '$HAPPY_EXPO_HOST'"
+  echo "Expected one of: localhost, lan, tunnel"
+  exit 1
+fi
+
 echo "Happy iOS Copilot bootstrap"
 echo "Repo: $ROOT_DIR"
 echo "Dev home: $HAPPY_DEV_HOME"
 echo "Bundle ID: $IOS_BUNDLE_ID"
+echo "Expo host mode: $HAPPY_EXPO_HOST"
 echo "Chat send target: $HAPPY_CHAT_SEND_TARGET"
 echo "VS Code mode: extension development host (stable code)"
 echo
@@ -375,21 +394,27 @@ if [[ "$HAPPY_FORCE_IOS_REBUILD" == "1" ]]; then
   echo "▶ Launching iOS app with full native rebuild (HAPPY_FORCE_IOS_REBUILD=1)"
   yarn --cwd "$ROOT_DIR/packages/happy-app" ios:dev
 elif is_ios_app_installed_on_booted_simulator; then
-  RUNNING_METRO_PORT="$(find_running_metro_port "$HAPPY_METRO_PORT" || true)"
-  if [[ -n "$RUNNING_METRO_PORT" ]]; then
-    METRO_PORT="$RUNNING_METRO_PORT"
-    echo "▶ Reusing running Metro on port: $METRO_PORT"
-    echo "▶ Launching iOS app without native rebuild (installed app detected)"
-    launch_installed_ios_app_and_open_dev_url "$METRO_PORT"
-    echo "▶ Metro already running; skipping new expo start"
-    exit 0
+  if [[ "$HAPPY_EXPO_HOST" == "localhost" ]]; then
+    RUNNING_METRO_PORT="$(find_running_metro_port "$HAPPY_METRO_PORT" || true)"
+    if [[ -n "$RUNNING_METRO_PORT" ]]; then
+      METRO_PORT="$RUNNING_METRO_PORT"
+      echo "▶ Reusing running Metro on port: $METRO_PORT"
+      echo "▶ Launching iOS app without native rebuild (installed app detected)"
+      launch_installed_ios_app_and_open_dev_url "$METRO_PORT"
+      echo "▶ Metro already running; skipping new expo start"
+      exit 0
+    fi
   fi
 
   METRO_PORT="$(resolve_available_metro_port "$HAPPY_METRO_PORT")"
   echo "▶ Starting new Metro on port: $METRO_PORT"
-  echo "▶ Launching iOS app without native rebuild (installed app detected)"
-  launch_installed_ios_app_and_open_dev_url "$METRO_PORT"
-  yarn --cwd "$ROOT_DIR/packages/happy-app" start:dev --dev-client --host localhost --port "$METRO_PORT"
+  if [[ "$HAPPY_EXPO_HOST" == "localhost" ]]; then
+    echo "▶ Launching iOS app without native rebuild (installed app detected)"
+    launch_installed_ios_app_and_open_dev_url "$METRO_PORT"
+  else
+    echo "▶ Host mode '$HAPPY_EXPO_HOST': open the dev build manually via QR / tunnel URL"
+  fi
+  start_expo_dev_server "$METRO_PORT"
 else
   echo "▶ Installed app not found on booted simulator; falling back to full native rebuild"
   yarn --cwd "$ROOT_DIR/packages/happy-app" ios:dev

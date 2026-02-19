@@ -1,11 +1,24 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 
 import type { VscodeInstanceMeta, VscodeSessionSummary } from './vscodeBridge';
 
 type ScanContext = Pick<VscodeInstanceMeta, 'appName' | 'workspaceFolders' | 'workspaceFile'>;
+
+export type VscodeAppTarget = 'vscode' | 'insiders';
+
+export type VscodeRecentWorkspaceSummary = {
+  id: string;
+  appTarget: VscodeAppTarget;
+  appName: string;
+  kind: 'folder' | 'workspace-file';
+  path: string;
+  label: string;
+  recentRank: number;
+};
 
 type WorkspaceMeta = {
   folder?: string;
@@ -17,12 +30,22 @@ type WorkspaceRecord = {
   workspaceDir: string;
   sessionsDir: string;
   displayName: string;
+  metaFolder?: string;
+  metaWorkspaceFile?: string;
   metaFolderPath?: string;
   metaWorkspaceFilePath?: string;
 };
 
 function isInsidersApp(appName?: string): boolean {
   return typeof appName === 'string' && appName.toLowerCase().includes('insider');
+}
+
+export function resolveVscodeAppTarget(appName?: string): VscodeAppTarget {
+  return isInsidersApp(appName) ? 'insiders' : 'vscode';
+}
+
+export function getVscodeAppLabel(appTarget: VscodeAppTarget): string {
+  return appTarget === 'insiders' ? 'VS Code Insiders' : 'VS Code';
 }
 
 function getDefaultWorkspaceStorageRoots(appName?: string): string[] {
@@ -96,7 +119,7 @@ function asPath(value: unknown): Array<string | number> | undefined {
   return pathSegments;
 }
 
-function normalizePathLike(value: string | null | undefined): string | undefined {
+function resolvePathLike(value: string | null | undefined): string | undefined {
   if (!value || typeof value !== 'string') return undefined;
 
   let resolved = value;
@@ -106,10 +129,17 @@ function normalizePathLike(value: string | null | undefined): string | undefined
     } catch {
       resolved = resolved.slice('file://'.length);
     }
+  } else if (/^[a-zA-Z]+:\/\//.test(resolved)) {
+    return undefined;
   }
 
   const normalized = path.normalize(resolved).replace(/[\\/]+$/, '');
-  if (normalized.length === 0) return undefined;
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizePathLike(value: string | null | undefined): string | undefined {
+  const normalized = resolvePathLike(value);
+  if (!normalized || normalized.length === 0) return undefined;
 
   return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
@@ -381,13 +411,17 @@ function listWorkspaceRecords(workspaceRoots: string[]): WorkspaceRecord[] {
       }
 
       const meta = readWorkspaceMeta(workspaceDir);
+      const metaFolder = resolvePathLike(meta.folder);
+      const metaWorkspaceFile = resolvePathLike(meta.workspaceFile);
       records.push({
         id: entry.name,
         workspaceDir,
         sessionsDir,
         displayName: getDisplayNameFromMeta(entry.name, meta),
-        metaFolderPath: normalizePathLike(meta.folder),
-        metaWorkspaceFilePath: normalizePathLike(meta.workspaceFile),
+        metaFolder,
+        metaWorkspaceFile,
+        metaFolderPath: normalizePathLike(metaFolder),
+        metaWorkspaceFilePath: normalizePathLike(metaWorkspaceFile),
       });
     }
   }
@@ -443,8 +477,146 @@ function listSessionFilesById(sessionsDir: string): Map<string, string> {
   return byId;
 }
 
+function listStateDbPaths(globalStorageRoots: string[]): string[] {
+  const paths: string[] = [];
+  for (const root of globalStorageRoots) {
+    const dbPath = path.join(root, 'state.vscdb');
+    if (fs.existsSync(dbPath)) {
+      paths.push(dbPath);
+    }
+  }
+  return paths;
+}
+
+function readRecentlyOpenedPayloadFromSqlite(dbPath: string): unknown | undefined {
+  try {
+    const query = "SELECT value FROM ItemTable WHERE key = 'history.recentlyOpenedPathsList';";
+    const result = spawnSync('sqlite3', [dbPath, query], {
+      encoding: 'utf8',
+      maxBuffer: 1024 * 1024 * 4
+    });
+    if (result.error || result.status !== 0) {
+      return undefined;
+    }
+    const raw = result.stdout.trim();
+    if (!raw) {
+      return undefined;
+    }
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+function readRecentlyOpenedPayload(globalStorageRoots: string[]): unknown | undefined {
+  for (const dbPath of listStateDbPaths(globalStorageRoots)) {
+    const payload = readRecentlyOpenedPayloadFromSqlite(dbPath);
+    if (payload) {
+      return payload;
+    }
+  }
+
+  // Older VS Code builds may still mirror this key into storage.json.
+  for (const root of globalStorageRoots) {
+    const storagePath = path.join(root, 'storage.json');
+    if (!fs.existsSync(storagePath)) continue;
+    try {
+      const raw = fs.readFileSync(storagePath, 'utf8');
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const payload = parsed['history.recentlyOpenedPathsList'];
+      if (payload) {
+        return payload;
+      }
+    } catch {
+      // Ignore unreadable fallback files.
+    }
+  }
+
+  return undefined;
+}
+
+function labelFromWorkspacePath(workspacePath: string): string {
+  const base = path.basename(workspacePath);
+  return base && base.length > 0 ? base : workspacePath;
+}
+
+function parseRecentWorkspaceEntries(
+  payload: unknown,
+  appTarget: VscodeAppTarget
+): VscodeRecentWorkspaceSummary[] {
+  const parsed = asRecord(payload);
+  if (!parsed) return [];
+  const entries = Array.isArray(parsed['entries']) ? parsed['entries'] : [];
+  if (entries.length === 0) return [];
+
+  const appName = getVscodeAppLabel(appTarget);
+  const seen = new Set<string>();
+  const workspaces: VscodeRecentWorkspaceSummary[] = [];
+
+  for (const [index, entry] of entries.entries()) {
+    const record = asRecord(entry);
+    if (!record) continue;
+
+    let kind: VscodeRecentWorkspaceSummary['kind'] | null = null;
+    let rawPath: string | undefined;
+
+    const workspaceEntry = asRecord(record['workspace']);
+    const workspaceConfigPath = asString(workspaceEntry?.['configPath']);
+    const folderUri = asString(record['folderUri']);
+
+    if (workspaceConfigPath) {
+      kind = 'workspace-file';
+      rawPath = workspaceConfigPath;
+    } else if (folderUri) {
+      kind = 'folder';
+      rawPath = folderUri;
+    } else {
+      continue;
+    }
+
+    const workspacePath = resolvePathLike(rawPath);
+    const normalizedPath = normalizePathLike(workspacePath);
+    if (!workspacePath || !normalizedPath || !kind) {
+      continue;
+    }
+
+    const dedupeKey = `${kind}:${normalizedPath}`;
+    if (seen.has(dedupeKey)) {
+      continue;
+    }
+    seen.add(dedupeKey);
+
+    workspaces.push({
+      id: `${appTarget}:${dedupeKey}`,
+      appTarget,
+      appName,
+      kind,
+      path: workspacePath,
+      label: labelFromWorkspacePath(workspacePath),
+      recentRank: index,
+    });
+  }
+
+  return workspaces;
+}
+
+export function listVscodeRecentWorkspaces(appName?: string): VscodeRecentWorkspaceSummary[] {
+  const appTarget = resolveVscodeAppTarget(appName);
+  const globalStorageRoots = getDefaultGlobalStorageRoots(appName);
+  const payload = readRecentlyOpenedPayload(globalStorageRoots);
+  if (!payload) {
+    return [];
+  }
+  return parseRecentWorkspaceEntries(payload, appTarget);
+}
+
 export async function scanVscodeSessionsFromDisk(
-  context: ScanContext
+  context: ScanContext,
+  options?: {
+    includeWorkspaceSessions?: boolean;
+    includeEmptyWindowSessions?: boolean;
+    filterByWindow?: boolean;
+  }
 ): Promise<Omit<VscodeSessionSummary, 'instanceId'>[]> {
   const workspaceRoots = getDefaultWorkspaceStorageRoots(context.appName);
   const globalStorageRoots = getDefaultGlobalStorageRoots(context.appName);
@@ -454,14 +626,15 @@ export async function scanVscodeSessionsFromDisk(
       .map((folder) => normalizePathLike(folder))
       .filter((folder): folder is string => Boolean(folder))
   );
-  const shouldFilterByWindow = normalizedWorkspaceFile !== undefined || normalizedWorkspaceFolders.size > 0;
-  const includeWorkspaceSessions = shouldFilterByWindow;
-  const includeEmptyWindowSessions = !shouldFilterByWindow;
+  const hasWindowContext = normalizedWorkspaceFile !== undefined || normalizedWorkspaceFolders.size > 0;
+  const shouldFilterByWindow = options?.filterByWindow ?? hasWindowContext;
+  const includeWorkspaceSessions = options?.includeWorkspaceSessions ?? (shouldFilterByWindow ? true : hasWindowContext);
+  const includeEmptyWindowSessions = options?.includeEmptyWindowSessions ?? !shouldFilterByWindow;
 
   const sessions: Omit<VscodeSessionSummary, 'instanceId'>[] = [];
   const workspaces = includeWorkspaceSessions ? listWorkspaceRecords(workspaceRoots) : [];
   for (const workspace of workspaces) {
-    if (includeWorkspaceSessions) {
+    if (shouldFilterByWindow) {
       const workspaceFileMatch = normalizedWorkspaceFile
         ? workspace.metaWorkspaceFilePath === normalizedWorkspaceFile
         : false;
@@ -493,7 +666,8 @@ export async function scanVscodeSessionsFromDisk(
         needsInput: getNeedsInput(parsed) ?? false,
         source: 'workspace',
         workspaceId: workspace.id,
-        workspaceDir: workspace.workspaceDir,
+        workspaceDir: workspace.metaFolder,
+        workspaceFile: workspace.metaWorkspaceFile,
         displayName: workspace.displayName,
         jsonPath,
       });
@@ -544,6 +718,7 @@ export async function scanVscodeSessionsFromDisk(
       needsInput: existing.needsInput || session.needsInput,
       workspaceId: session.workspaceId ?? existing.workspaceId,
       workspaceDir: session.workspaceDir ?? existing.workspaceDir,
+      workspaceFile: session.workspaceFile ?? existing.workspaceFile,
       displayName: session.displayName ?? existing.displayName,
     });
   }
@@ -551,4 +726,19 @@ export async function scanVscodeSessionsFromDisk(
   const deduped = Array.from(dedupedByFile.values());
   deduped.sort((a, b) => (b.lastMessageDate ?? 0) - (a.lastMessageDate ?? 0));
   return deduped;
+}
+
+export async function scanAllVscodeSessionsFromDisk(appName?: string): Promise<Omit<VscodeSessionSummary, 'instanceId'>[]> {
+  return scanVscodeSessionsFromDisk(
+    {
+      appName: appName ?? getVscodeAppLabel(resolveVscodeAppTarget(appName)),
+      workspaceFolders: [],
+      workspaceFile: null
+    },
+    {
+      includeWorkspaceSessions: true,
+      includeEmptyWindowSessions: true,
+      filterByWindow: false
+    }
+  );
 }

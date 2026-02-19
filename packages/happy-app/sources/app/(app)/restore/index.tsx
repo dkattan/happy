@@ -140,7 +140,8 @@ export default function Restore() {
                         1. Open Happy on your mobile device{'\n'}
                         2. Go to Settings → Account{'\n'}
                         3. Tap "Link New Device"{'\n'}
-                        4. Scan this QR code
+                        4. Tap "Scan QR code to authenticate"{'\n'}
+                        5. Scan this QR code
                     </Text>
                 </View>
                 {!authReady && (

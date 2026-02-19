@@ -1,7 +1,16 @@
 import { randomUUID } from 'crypto';
 import { readFileSync } from 'fs';
+import os from 'os';
 import path from 'path';
-import { scanVscodeSessionsFromDisk } from './vscodeSessionScan';
+import {
+  getVscodeAppLabel,
+  listVscodeRecentWorkspaces,
+  resolveVscodeAppTarget,
+  scanAllVscodeSessionsFromDisk,
+  scanVscodeSessionsFromDisk,
+  type VscodeAppTarget,
+  type VscodeRecentWorkspaceSummary
+} from './vscodeSessionScan';
 
 export type VscodeSessionSummary = {
   id: string;
@@ -11,9 +20,52 @@ export type VscodeSessionSummary = {
   source: 'workspace' | 'empty-window';
   workspaceId?: string;
   workspaceDir?: string;
+  workspaceFile?: string;
+  workspacePathDisplay?: string;
   displayName?: string;
   jsonPath: string;
   instanceId: string;
+};
+
+export type VscodeFlatSessionSummary = Omit<VscodeSessionSummary, 'instanceId'> & {
+  appTarget: VscodeAppTarget;
+  appName: string;
+  instanceId?: string;
+  instanceLabel?: string;
+  workspaceOpen: boolean;
+  seenInLive: boolean;
+  seenOnDisk: boolean;
+};
+
+export type VscodeRecentWorkspaceState = VscodeRecentWorkspaceSummary & {
+  workspaceOpen: boolean;
+  instanceId?: string;
+  lastActivityAt?: number;
+  seenInLive: boolean;
+  seenOnDisk: boolean;
+};
+
+export type VscodeSearchEntity = 'sessions' | 'workspaces' | 'both';
+export type VscodeSearchTextMode = 'contains' | 'regex';
+
+export type VscodeSearchParams = {
+  query?: string;
+  entity: VscodeSearchEntity;
+  appTarget?: VscodeAppTarget;
+  appTargets?: VscodeAppTarget[];
+  includeOpen?: boolean;
+  includeClosed?: boolean;
+  source?: {
+    live?: boolean;
+    disk?: boolean;
+  };
+  recency?: {
+    since?: number;
+    until?: number;
+    lastDays?: number;
+  };
+  textMode?: VscodeSearchTextMode;
+  limit?: number;
 };
 
 export type VscodeInstanceMeta = {
@@ -51,6 +103,17 @@ export type VscodeConversationMessage = {
   role: 'user' | 'assistant';
   text: string;
   timestamp: number;
+  fileTrees?: VscodeConversationFileTree[];
+};
+
+export type VscodeConversationFileTreeNode = {
+  label: string;
+  children?: VscodeConversationFileTreeNode[];
+};
+
+export type VscodeConversationFileTree = {
+  basePath?: string;
+  roots: VscodeConversationFileTreeNode[];
 };
 
 export type VscodeConversationHistory = {
@@ -62,6 +125,8 @@ export type VscodeConversationHistory = {
 export type VscodeBridgeSnapshot = {
   instances: VscodeInstanceSummary[];
   sessions: VscodeSessionSummary[];
+  flatSessions: VscodeFlatSessionSummary[];
+  recentWorkspaces: VscodeRecentWorkspaceState[];
   needsInputCount: number;
   updatedAt: number;
 };
@@ -93,8 +158,18 @@ type VscodeInstanceState = {
   commands: VscodeCommand[];
 };
 
+type VscodeGlobalScanState = {
+  appTarget: VscodeAppTarget;
+  appName: string;
+  sessions: Omit<VscodeSessionSummary, 'instanceId'>[];
+  recentWorkspaces: VscodeRecentWorkspaceSummary[];
+  lastScanAt: number;
+  scanInFlight: Promise<void> | null;
+};
+
 const STALE_INSTANCE_MS = 120000;
 const SCAN_MIN_INTERVAL_MS = 15000;
+const HOME_DIR = os.homedir();
 
 function nowMs(): number {
   return Date.now();
@@ -140,6 +215,158 @@ function normalizePathLike(value: string | null | undefined): string | undefined
   return process.platform === 'win32'
     ? normalized.toLowerCase()
     : normalized;
+}
+
+function getPathTail(pathLike: string | null | undefined): string | undefined {
+  if (!pathLike || typeof pathLike !== 'string') {
+    return undefined;
+  }
+  const parts = pathLike.split(/[\\/]/).filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : undefined;
+}
+
+function resolveTildePath(pathLike: string | undefined): string | undefined {
+  if (!pathLike) {
+    return undefined;
+  }
+  if (pathLike === '~') {
+    return HOME_DIR;
+  }
+  if (pathLike.startsWith('~/') || pathLike.startsWith('~\\')) {
+    return path.join(HOME_DIR, pathLike.slice(2));
+  }
+  return pathLike;
+}
+
+function compactPathForDisplay(pathLike: string | undefined): string | undefined {
+  const resolvedPath = resolveTildePath(pathLike);
+  const normalizedPath = normalizePathLike(resolvedPath);
+  if (!normalizedPath) {
+    return undefined;
+  }
+  const normalizedHome = normalizePathLike(HOME_DIR);
+  if (!normalizedHome) {
+    return normalizedPath;
+  }
+  if (normalizedPath === normalizedHome) {
+    return '~';
+  }
+
+  const homePrefix = `${normalizedHome}${path.sep}`;
+  if (normalizedPath.startsWith(homePrefix)) {
+    return `~${normalizedPath.slice(normalizedHome.length)}`;
+  }
+  return normalizedPath;
+}
+
+function getWorkspacePathDisplay(session: Pick<VscodeSessionSummary, 'workspaceDir' | 'workspaceFile'>): string | undefined {
+  const workspaceDir = resolveTildePath(session.workspaceDir);
+  if (workspaceDir) {
+    return compactPathForDisplay(workspaceDir);
+  }
+
+  const workspaceFile = resolveTildePath(session.workspaceFile);
+  if (!workspaceFile) {
+    return undefined;
+  }
+  const directoryFromFile = path.dirname(workspaceFile);
+  return compactPathForDisplay(directoryFromFile === '.' ? workspaceFile : directoryFromFile);
+}
+
+function extractUriPath(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    return value;
+  }
+  const record = asRecord(value);
+  if (!record) {
+    return undefined;
+  }
+
+  const fsPath = asString(record.fsPath);
+  if (fsPath && fsPath.length > 0) {
+    return fsPath;
+  }
+
+  const pathValue = asString(record.path);
+  if (pathValue && pathValue.length > 0) {
+    return pathValue;
+  }
+
+  const external = asString(record.external);
+  if (external && external.length > 0) {
+    return external;
+  }
+  return undefined;
+}
+
+function toFileTreeNode(value: unknown): VscodeConversationFileTreeNode | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const label = asString(record.label)
+    ?? asString(record.name)
+    ?? getPathTail(extractUriPath(record.uri))
+    ?? undefined;
+
+  if (!label || label.length === 0) {
+    return null;
+  }
+
+  const rawChildren = Array.isArray(record.children) ? record.children : [];
+  const children = rawChildren
+    .map((child) => toFileTreeNode(child))
+    .filter((child): child is VscodeConversationFileTreeNode => child !== null);
+
+  if (children.length > 0) {
+    return { label, children };
+  }
+  return { label };
+}
+
+function toFileTrees(value: unknown, basePathHint?: string): VscodeConversationFileTree[] {
+  const rootsSource = Array.isArray(value) ? value : [value];
+  const roots = rootsSource
+    .map((entry) => toFileTreeNode(entry))
+    .filter((entry): entry is VscodeConversationFileTreeNode => entry !== null);
+
+  if (roots.length === 0) {
+    return [];
+  }
+
+  const compactBasePath = compactPathForDisplay(basePathHint);
+  return [{
+    basePath: compactBasePath,
+    roots
+  }];
+}
+
+function sanitizeFileTrees(value: unknown): VscodeConversationFileTree[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const trees: VscodeConversationFileTree[] = [];
+  for (const entry of value) {
+    const record = asRecord(entry);
+    if (!record) {
+      continue;
+    }
+    const roots = Array.isArray(record.roots)
+      ? record.roots
+        .map((root) => toFileTreeNode(root))
+        .filter((root): root is VscodeConversationFileTreeNode => root !== null)
+      : [];
+    if (roots.length === 0) {
+      continue;
+    }
+    trees.push({
+      basePath: compactPathForDisplay(asString(record.basePath)),
+      roots
+    });
+  }
+  return trees;
 }
 
 function setPathValue(rootValue: unknown, objectPath: Array<string | number>, nextValue: unknown): unknown {
@@ -286,11 +513,17 @@ function extractUserText(request: ChatRequestRecord): string {
   return chunks.join('\n').trim();
 }
 
-function extractAssistantText(request: ChatRequestRecord): string {
+function extractAssistantPayload(request: ChatRequestRecord): {
+  text: string;
+  fileTrees: VscodeConversationFileTree[];
+} {
   const response = Array.isArray(request.response) ? request.response : [];
-  if (response.length === 0) return '';
+  if (response.length === 0) {
+    return { text: '', fileTrees: [] };
+  }
 
   const chunks: string[] = [];
+  const fileTrees: VscodeConversationFileTree[] = [];
   for (const entry of response) {
     const record = asRecord(entry);
     if (!record) continue;
@@ -300,18 +533,33 @@ function extractAssistantText(request: ChatRequestRecord): string {
       continue;
     }
 
+    if (kind === 'treedata' || kind === 'filetree' || record.treeData !== undefined) {
+      const treeData = record.treeData ?? record.value;
+      const basePath = extractUriPath(record.uri) ?? extractUriPath(asRecord(record.treeData)?.uri);
+      fileTrees.push(...toFileTrees(treeData, basePath));
+      continue;
+    }
+
     const text = asString(record.value) ?? asString(record.text) ?? asString(record.content) ?? asString(record.markdown);
     if (!text || text.trim().length === 0) continue;
     chunks.push(text);
   }
 
-  return chunks.join('').trim();
+  return {
+    text: chunks.join('').trim(),
+    fileTrees
+  };
 }
 
 export class VscodeBridge {
   private instances = new Map<string, VscodeInstanceState>();
+  private globalScans = new Map<VscodeAppTarget, VscodeGlobalScanState>();
 
-  constructor(private onUpdate?: (snapshot: VscodeBridgeSnapshot) => void) {}
+  constructor(private onUpdate?: (snapshot: VscodeBridgeSnapshot) => void) {
+    this.ensureGlobalScanState('vscode');
+    this.ensureGlobalScanState('insiders');
+    this.scheduleGlobalScan();
+  }
 
   async register(meta: VscodeInstanceMeta): Promise<void> {
     const existing = this.instances.get(meta.instanceId);
@@ -331,6 +579,7 @@ export class VscodeBridge {
       scanInFlight: null,
       commands: existing?.commands ?? []
     });
+    this.scheduleGlobalScan(meta.appName);
     this.emitUpdate();
   }
 
@@ -348,6 +597,7 @@ export class VscodeBridge {
           }
         });
     }
+    this.scheduleGlobalScan(instance.meta.appName);
     this.emitUpdate();
     return true;
   }
@@ -371,6 +621,7 @@ export class VscodeBridge {
         });
       await instance.scanInFlight;
     }
+    this.scheduleGlobalScan(instance.meta.appName);
     this.emitUpdate();
     return true;
   }
@@ -384,20 +635,27 @@ export class VscodeBridge {
     const instance = this.instances.get(instanceId);
     if (!instance) return false;
 
-    const sanitizedMessages = messages
-      .filter((message) =>
-        message &&
-        (message.role === 'user' || message.role === 'assistant') &&
-        typeof message.text === 'string' &&
-        message.text.trim().length > 0 &&
-        Number.isFinite(message.timestamp)
-      )
-      .map((message, index) => ({
+    const sanitizedMessages: VscodeConversationMessage[] = [];
+    for (const [index, message] of messages.entries()) {
+      if (!message || (message.role !== 'user' && message.role !== 'assistant') || !Number.isFinite(message.timestamp)) {
+        continue;
+      }
+
+      const text = typeof message.text === 'string' ? message.text : '';
+      const fileTrees = sanitizeFileTrees((message as { fileTrees?: unknown }).fileTrees);
+      const hasText = text.trim().length > 0;
+      if (!hasText && fileTrees.length === 0) {
+        continue;
+      }
+
+      sanitizedMessages.push({
         id: typeof message.id === 'string' && message.id.length > 0 ? message.id : `${sessionId}:live:${index}`,
         role: message.role,
-        text: message.text,
-        timestamp: message.timestamp
-      }));
+        text,
+        timestamp: message.timestamp,
+        fileTrees: fileTrees.length > 0 ? fileTrees : undefined
+      });
+    }
 
     instance.liveHistoryBySession.set(sessionId, {
       messages: sanitizedMessages.slice(-500),
@@ -509,6 +767,108 @@ export class VscodeBridge {
     return null;
   }
 
+  search(params: VscodeSearchParams): {
+    flatSessions?: VscodeFlatSessionSummary[];
+    recentWorkspaces?: VscodeRecentWorkspaceState[];
+  } {
+    this.pruneStale();
+    this.scheduleGlobalScan();
+
+    const includeOpen = params.includeOpen ?? true;
+    const includeClosed = params.includeClosed ?? true;
+    const includeLive = params.source?.live ?? true;
+    const includeDisk = params.source?.disk ?? true;
+    const limit = Math.max(1, Math.min(500, Math.floor(params.limit ?? 100)));
+    const appTargets = this.resolveSearchAppTargets(params.appTarget, params.appTargets);
+    const textMode = params.textMode ?? 'contains';
+    const query = typeof params.query === 'string' ? params.query.trim() : '';
+    const tokens = textMode === 'contains' ? this.getSearchTokens(query) : [];
+    const regex = textMode === 'regex' ? this.compileSearchRegex(query) : null;
+    const recencyWindow = this.getRecencyWindow(params.recency);
+
+    const includeByOpenState = (workspaceOpen: boolean): boolean => (
+      (workspaceOpen && includeOpen) || (!workspaceOpen && includeClosed)
+    );
+    const includeBySource = (seenInLive: boolean, seenOnDisk: boolean): boolean => (
+      (includeLive && seenInLive) || (includeDisk && seenOnDisk)
+    );
+
+    const result: {
+      flatSessions?: VscodeFlatSessionSummary[];
+      recentWorkspaces?: VscodeRecentWorkspaceState[];
+    } = {};
+
+    if (params.entity === 'sessions' || params.entity === 'both') {
+      const filteredSessions = this.getFlatSessions()
+        .filter((session) => appTargets.has(session.appTarget))
+        .filter((session) => includeByOpenState(session.workspaceOpen))
+        .filter((session) => includeBySource(session.seenInLive, session.seenOnDisk))
+        .filter((session) => this.matchesRecencyWindow(session.lastMessageDate, recencyWindow))
+        .filter((session) => this.matchesSearchQuery(
+          tokens,
+          regex,
+          [
+            session.title,
+            session.displayName,
+            session.workspaceFile,
+            session.workspaceDir,
+            session.appName,
+            session.instanceLabel,
+            session.source,
+            session.jsonPath
+          ]
+        ));
+
+      result.flatSessions = filteredSessions.slice(0, limit);
+    }
+
+    if (params.entity === 'workspaces' || params.entity === 'both') {
+      const appOrder: Record<VscodeAppTarget, number> = {
+        vscode: 0,
+        insiders: 1,
+      };
+
+      const filteredWorkspaces = this.getRecentWorkspaces()
+        .filter((workspace) => appTargets.has(workspace.appTarget))
+        .filter((workspace) => includeByOpenState(workspace.workspaceOpen))
+        .filter((workspace) => includeBySource(workspace.seenInLive, workspace.seenOnDisk))
+        .filter((workspace) => this.matchesRecencyWindow(workspace.lastActivityAt, recencyWindow))
+        .filter((workspace) => this.matchesSearchQuery(
+          tokens,
+          regex,
+          [
+            workspace.label,
+            workspace.path,
+            workspace.kind,
+            workspace.appName,
+            workspace.id
+          ]
+        ))
+        .sort((a, b) => {
+          const activityDelta = (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0);
+          if (activityDelta !== 0) {
+            return activityDelta;
+          }
+          const rankDelta = (a.recentRank ?? Number.MAX_SAFE_INTEGER) - (b.recentRank ?? Number.MAX_SAFE_INTEGER);
+          if (rankDelta !== 0) {
+            return rankDelta;
+          }
+          if (a.workspaceOpen !== b.workspaceOpen) {
+            return Number(b.workspaceOpen) - Number(a.workspaceOpen);
+          }
+          const appDelta = (appOrder[a.appTarget] ?? 99) - (appOrder[b.appTarget] ?? 99);
+          if (appDelta !== 0) {
+            return appDelta;
+          }
+          return a.label.localeCompare(b.label);
+        });
+
+      result.recentWorkspaces = filteredWorkspaces.slice(0, limit);
+    }
+
+    return result;
+  }
+
   getSessionHistory(instanceId: string, sessionId: string, limit: number = 200): VscodeConversationHistory {
     this.pruneStale();
     const instance = this.instances.get(instanceId);
@@ -520,13 +880,17 @@ export class VscodeBridge {
     if (!session) {
       throw new Error('VS Code session not found');
     }
+    const sessionWithDisplayPath: VscodeSessionSummary = {
+      ...session,
+      workspacePathDisplay: getWorkspacePathDisplay(session)
+    };
 
     const effectiveLimit = Math.max(1, Math.floor(limit));
     const liveHistory = instance.liveHistoryBySession.get(sessionId);
     if (liveHistory && liveHistory.messages.length > 0) {
       const startIndex = Math.max(0, liveHistory.messages.length - effectiveLimit);
       return {
-        session,
+        session: sessionWithDisplayPath,
         messages: liveHistory.messages.slice(startIndex),
         updatedAt: liveHistory.updatedAt
       };
@@ -553,19 +917,20 @@ export class VscodeBridge {
         });
       }
 
-      const assistantText = extractAssistantText(request);
-      if (assistantText.length > 0) {
+      const assistant = extractAssistantPayload(request);
+      if (assistant.text.length > 0 || assistant.fileTrees.length > 0) {
         messages.push({
           id: `${sessionId}:a:${i}`,
           role: 'assistant',
-          text: assistantText,
-          timestamp: timestamp + 1
+          text: assistant.text,
+          timestamp: timestamp + 1,
+          fileTrees: assistant.fileTrees.length > 0 ? assistant.fileTrees : undefined
         });
       }
     }
 
     return {
-      session,
+      session: sessionWithDisplayPath,
       messages,
       updatedAt: nowMs()
     };
@@ -580,19 +945,485 @@ export class VscodeBridge {
 
   getSnapshot(): VscodeBridgeSnapshot {
     const instances = this.listInstances();
+    this.scheduleGlobalScan();
     const sessions = Array.from(this.instances.values()).flatMap((entry) => this.getMergedSessions(entry));
-    const needsInputCount = sessions.filter((s) => s.needsInput).length;
+    const flatSessions = this.getFlatSessions();
+    const recentWorkspaces = this.getRecentWorkspaces();
+    const needsInputCount = flatSessions.filter((s) => s.needsInput).length;
     return {
       instances,
       sessions,
+      flatSessions,
+      recentWorkspaces,
       needsInputCount,
       updatedAt: nowMs()
     };
   }
 
-  private buildSessionKey(session: VscodeSessionSummary): string {
+  private ensureGlobalScanState(appTarget: VscodeAppTarget): VscodeGlobalScanState {
+    const existing = this.globalScans.get(appTarget);
+    if (existing) {
+      return existing;
+    }
+    const created: VscodeGlobalScanState = {
+      appTarget,
+      appName: getVscodeAppLabel(appTarget),
+      sessions: [],
+      recentWorkspaces: [],
+      lastScanAt: 0,
+      scanInFlight: null
+    };
+    this.globalScans.set(appTarget, created);
+    return created;
+  }
+
+  private scheduleGlobalScan(appName?: string): void {
+    const appTargets: VscodeAppTarget[] = appName
+      ? [resolveVscodeAppTarget(appName)]
+      : ['vscode', 'insiders'];
+
+    for (const appTarget of appTargets) {
+      const state = this.ensureGlobalScanState(appTarget);
+      if (state.scanInFlight || nowMs() - state.lastScanAt < SCAN_MIN_INTERVAL_MS) {
+        continue;
+      }
+      state.scanInFlight = this.refreshGlobalScan(appTarget)
+        .catch(() => undefined)
+        .finally(() => {
+          const current = this.globalScans.get(appTarget);
+          if (current) {
+            current.scanInFlight = null;
+          }
+        });
+    }
+  }
+
+  private async refreshGlobalScan(appTarget: VscodeAppTarget): Promise<void> {
+    const state = this.ensureGlobalScanState(appTarget);
+    if (nowMs() - state.lastScanAt < SCAN_MIN_INTERVAL_MS) {
+      return;
+    }
+
+    try {
+      state.sessions = await scanAllVscodeSessionsFromDisk(state.appName);
+      state.recentWorkspaces = listVscodeRecentWorkspaces(state.appName);
+      state.lastScanAt = nowMs();
+      this.emitUpdate();
+    } catch {
+      state.lastScanAt = nowMs();
+    }
+  }
+
+  private getInstanceLabel(meta: VscodeInstanceMeta, fallbackInstanceId: string): string {
+    const workspaceFileName = getPathTail(meta.workspaceFile);
+    if (workspaceFileName) {
+      return workspaceFileName;
+    }
+
+    if (Array.isArray(meta.workspaceFolders) && meta.workspaceFolders.length > 0) {
+      const first = getPathTail(meta.workspaceFolders[0]) ?? 'Workspace';
+      if (meta.workspaceFolders.length === 1) {
+        return first;
+      }
+      return `${first} +${meta.workspaceFolders.length - 1}`;
+    }
+
+    if (meta.appName && meta.platform) {
+      return `${meta.appName} (${meta.platform})`;
+    }
+
+    return `Window ${fallbackInstanceId.slice(0, 8)}`;
+  }
+
+  private getWorkspacePresenceByApp(): Map<VscodeAppTarget, {
+    instanceByWorkspaceFile: Map<string, string>;
+    instanceByWorkspaceDir: Map<string, string>;
+    emptyWindowInstanceId?: string;
+  }> {
+    const presenceByApp = new Map<VscodeAppTarget, {
+      instanceByWorkspaceFile: Map<string, string>;
+      instanceByWorkspaceDir: Map<string, string>;
+      emptyWindowInstanceId?: string;
+    }>();
+
+    const ensurePresence = (appTarget: VscodeAppTarget) => {
+      const existing = presenceByApp.get(appTarget);
+      if (existing) return existing;
+      const created = {
+        instanceByWorkspaceFile: new Map<string, string>(),
+        instanceByWorkspaceDir: new Map<string, string>(),
+        emptyWindowInstanceId: undefined as string | undefined
+      };
+      presenceByApp.set(appTarget, created);
+      return created;
+    };
+
+    for (const [instanceId, instance] of this.instances.entries()) {
+      const appTarget = resolveVscodeAppTarget(instance.meta.appName);
+      const presence = ensurePresence(appTarget);
+
+      const normalizedWorkspaceFile = normalizePathLike(instance.meta.workspaceFile ?? undefined);
+      if (normalizedWorkspaceFile) {
+        presence.instanceByWorkspaceFile.set(normalizedWorkspaceFile, instanceId);
+      }
+
+      const normalizedFolders = (instance.meta.workspaceFolders ?? [])
+        .map((folder) => normalizePathLike(folder))
+        .filter((folder): folder is string => Boolean(folder));
+
+      for (const folder of normalizedFolders) {
+        if (!presence.instanceByWorkspaceDir.has(folder)) {
+          presence.instanceByWorkspaceDir.set(folder, instanceId);
+        }
+      }
+
+      if (!normalizedWorkspaceFile && normalizedFolders.length === 0 && !presence.emptyWindowInstanceId) {
+        presence.emptyWindowInstanceId = instanceId;
+      }
+    }
+
+    return presenceByApp;
+  }
+
+  private resolveSessionOpenState(
+    session: Pick<VscodeSessionSummary, 'source' | 'workspaceDir' | 'workspaceFile'> & { instanceId?: string },
+    appTarget: VscodeAppTarget,
+    presenceByApp: Map<VscodeAppTarget, {
+      instanceByWorkspaceFile: Map<string, string>;
+      instanceByWorkspaceDir: Map<string, string>;
+      emptyWindowInstanceId?: string;
+    }>
+  ): { workspaceOpen: boolean; instanceId?: string } {
+    if (session.instanceId && this.instances.has(session.instanceId)) {
+      return { workspaceOpen: true, instanceId: session.instanceId };
+    }
+
+    const presence = presenceByApp.get(appTarget);
+    if (!presence) {
+      return { workspaceOpen: false };
+    }
+
+    const normalizedWorkspaceFile = normalizePathLike(session.workspaceFile ?? undefined);
+    if (normalizedWorkspaceFile) {
+      const instanceId = presence.instanceByWorkspaceFile.get(normalizedWorkspaceFile);
+      if (instanceId) {
+        return { workspaceOpen: true, instanceId };
+      }
+    }
+
+    const normalizedWorkspaceDir = normalizePathLike(session.workspaceDir ?? undefined);
+    if (normalizedWorkspaceDir) {
+      const instanceId = presence.instanceByWorkspaceDir.get(normalizedWorkspaceDir);
+      if (instanceId) {
+        return { workspaceOpen: true, instanceId };
+      }
+    }
+
+    if (session.source === 'empty-window' && presence.emptyWindowInstanceId) {
+      return { workspaceOpen: true, instanceId: presence.emptyWindowInstanceId };
+    }
+
+    return { workspaceOpen: false };
+  }
+
+  private mergeFlatSession(
+    existing: VscodeFlatSessionSummary,
+    incoming: VscodeFlatSessionSummary
+  ): VscodeFlatSessionSummary {
+    return {
+      ...existing,
+      ...incoming,
+      appTarget: existing.appTarget,
+      appName: existing.appName || incoming.appName,
+      title: incoming.title?.trim().length ? incoming.title : existing.title,
+      lastMessageDate: Math.max(existing.lastMessageDate ?? 0, incoming.lastMessageDate ?? 0),
+      needsInput: existing.needsInput || incoming.needsInput,
+      workspaceId: incoming.workspaceId ?? existing.workspaceId,
+      workspaceDir: incoming.workspaceDir ?? existing.workspaceDir,
+      workspaceFile: incoming.workspaceFile ?? existing.workspaceFile,
+      displayName: incoming.displayName ?? existing.displayName,
+      workspaceOpen: existing.workspaceOpen || incoming.workspaceOpen,
+      seenInLive: existing.seenInLive || incoming.seenInLive,
+      seenOnDisk: existing.seenOnDisk || incoming.seenOnDisk,
+      instanceId: existing.instanceId ?? incoming.instanceId,
+      instanceLabel: existing.instanceLabel ?? incoming.instanceLabel,
+      source: incoming.source ?? existing.source,
+      jsonPath: incoming.jsonPath ?? existing.jsonPath,
+      id: incoming.id || existing.id,
+    };
+  }
+
+  private getFlatSessions(): VscodeFlatSessionSummary[] {
+    const byKey = new Map<string, VscodeFlatSessionSummary>();
+    const presenceByApp = this.getWorkspacePresenceByApp();
+
+    for (const [instanceId, instance] of this.instances.entries()) {
+      const appTarget = resolveVscodeAppTarget(instance.meta.appName);
+      const appName = getVscodeAppLabel(appTarget);
+      const instanceLabel = this.getInstanceLabel(instance.meta, instanceId);
+
+      for (const session of this.getMergedSessions(instance)) {
+        const key = this.buildSessionKey(session);
+        const liveSession: VscodeFlatSessionSummary = {
+          ...session,
+          appTarget,
+          appName,
+          workspaceDir: session.workspaceDir ?? instance.meta.workspaceFolders?.[0] ?? undefined,
+          workspaceFile: session.workspaceFile ?? instance.meta.workspaceFile ?? undefined,
+          workspaceOpen: true,
+          seenInLive: true,
+          seenOnDisk: false,
+          instanceId,
+          instanceLabel
+        };
+        const existing = byKey.get(key);
+        byKey.set(key, existing ? this.mergeFlatSession(existing, liveSession) : liveSession);
+      }
+    }
+
+    for (const state of this.globalScans.values()) {
+      for (const session of state.sessions) {
+        const openState = this.resolveSessionOpenState(
+          { ...session, instanceId: undefined },
+          state.appTarget,
+          presenceByApp
+        );
+        const instance = openState.instanceId ? this.instances.get(openState.instanceId) : undefined;
+        const diskSession: VscodeFlatSessionSummary = {
+          ...session,
+          appTarget: state.appTarget,
+          appName: state.appName,
+          workspaceOpen: openState.workspaceOpen,
+          seenInLive: openState.workspaceOpen,
+          seenOnDisk: true,
+          instanceId: openState.instanceId,
+          instanceLabel: instance ? this.getInstanceLabel(instance.meta, openState.instanceId as string) : undefined,
+        };
+        const key = this.buildSessionKey(diskSession);
+        const existing = byKey.get(key);
+        byKey.set(key, existing ? this.mergeFlatSession(existing, diskSession) : diskSession);
+      }
+    }
+
+    return Array.from(byKey.values()).sort((a, b) => {
+      if (a.workspaceOpen !== b.workspaceOpen) {
+        return Number(b.workspaceOpen) - Number(a.workspaceOpen);
+      }
+      if (a.needsInput !== b.needsInput) {
+        return Number(b.needsInput) - Number(a.needsInput);
+      }
+      return (b.lastMessageDate ?? 0) - (a.lastMessageDate ?? 0);
+    });
+  }
+
+  private getRecentWorkspaces(): VscodeRecentWorkspaceState[] {
+    const byKey = new Map<string, VscodeRecentWorkspaceState>();
+    const presenceByApp = this.getWorkspacePresenceByApp();
+    const workspaceActivityByKey = new Map<string, number>();
+
+    for (const session of this.getFlatSessions()) {
+      const lastMessageDate = Number.isFinite(session.lastMessageDate) ? session.lastMessageDate : 0;
+      if (lastMessageDate <= 0) {
+        continue;
+      }
+
+      const updateWorkspaceActivity = (kind: VscodeRecentWorkspaceSummary['kind'], pathLike: string | undefined) => {
+        if (!pathLike) {
+          return;
+        }
+        const normalizedPath = normalizePathLike(pathLike) ?? pathLike;
+        const key = `${session.appTarget}:${kind}:${normalizedPath}`;
+        const existing = workspaceActivityByKey.get(key) ?? 0;
+        if (lastMessageDate > existing) {
+          workspaceActivityByKey.set(key, lastMessageDate);
+        }
+      };
+
+      updateWorkspaceActivity('workspace-file', session.workspaceFile);
+      updateWorkspaceActivity('folder', session.workspaceDir);
+    }
+
+    for (const state of this.globalScans.values()) {
+      for (const workspace of state.recentWorkspaces) {
+        const presence = presenceByApp.get(workspace.appTarget);
+        const normalizedPath = normalizePathLike(workspace.path) ?? workspace.path;
+        let instanceId: string | undefined;
+        if (presence) {
+          if (workspace.kind === 'workspace-file') {
+            instanceId = presence.instanceByWorkspaceFile.get(normalizedPath);
+          } else {
+            instanceId = presence.instanceByWorkspaceDir.get(normalizedPath);
+          }
+        }
+
+        const key = `${workspace.appTarget}:${workspace.kind}:${normalizedPath}`;
+        const next: VscodeRecentWorkspaceState = {
+          ...workspace,
+          workspaceOpen: Boolean(instanceId),
+          instanceId,
+          lastActivityAt: workspaceActivityByKey.get(key),
+          seenInLive: Boolean(instanceId),
+          seenOnDisk: true,
+        };
+        const existing = byKey.get(key);
+        if (!existing) {
+          byKey.set(key, next);
+          continue;
+        }
+        byKey.set(key, {
+          ...existing,
+          ...next,
+          recentRank: Math.min(existing.recentRank, next.recentRank),
+          workspaceOpen: existing.workspaceOpen || next.workspaceOpen,
+          instanceId: existing.instanceId ?? next.instanceId,
+          seenInLive: existing.seenInLive || next.seenInLive,
+          seenOnDisk: existing.seenOnDisk || next.seenOnDisk,
+          lastActivityAt: Math.max(existing.lastActivityAt ?? 0, next.lastActivityAt ?? 0) || undefined,
+        });
+      }
+    }
+
+    const appOrder: Record<VscodeAppTarget, number> = {
+      vscode: 0,
+      insiders: 1,
+    };
+
+    return Array.from(byKey.values()).sort((a, b) => {
+      const activityDelta = (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0);
+      if (activityDelta !== 0) {
+        return activityDelta;
+      }
+      const rankDelta = (a.recentRank ?? Number.MAX_SAFE_INTEGER) - (b.recentRank ?? Number.MAX_SAFE_INTEGER);
+      if (rankDelta !== 0) {
+        return rankDelta;
+      }
+      if (a.workspaceOpen !== b.workspaceOpen) {
+        return Number(b.workspaceOpen) - Number(a.workspaceOpen);
+      }
+      const appDelta = (appOrder[a.appTarget] ?? 99) - (appOrder[b.appTarget] ?? 99);
+      if (appDelta !== 0) {
+        return appDelta;
+      }
+      return a.label.localeCompare(b.label);
+    });
+  }
+
+  private buildSessionKey(session: Pick<VscodeSessionSummary, 'id' | 'jsonPath'>): string {
     const normalizedPath = normalizePathLike(session.jsonPath) ?? session.jsonPath;
     return `${session.id}::${normalizedPath}`;
+  }
+
+  private resolveSearchAppTargets(
+    appTarget?: VscodeAppTarget,
+    appTargets?: VscodeAppTarget[]
+  ): Set<VscodeAppTarget> {
+    if (Array.isArray(appTargets) && appTargets.length > 0) {
+      return new Set(appTargets.filter((value): value is VscodeAppTarget => value === 'vscode' || value === 'insiders'));
+    }
+    if (appTarget) {
+      return new Set([appTarget]);
+    }
+    return new Set<VscodeAppTarget>(['vscode', 'insiders']);
+  }
+
+  private compileSearchRegex(query: string): RegExp | null {
+    const trimmed = query.trim();
+    if (trimmed.length === 0) {
+      return null;
+    }
+    try {
+      return new RegExp(trimmed, 'i');
+    } catch (error) {
+      throw new Error(`Invalid regex query: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private getRecencyWindow(recency: VscodeSearchParams['recency']): { since?: number; until?: number } | null {
+    if (!recency) {
+      return null;
+    }
+
+    let since = Number.isFinite(recency.since) ? Number(recency.since) : undefined;
+    let until = Number.isFinite(recency.until) ? Number(recency.until) : undefined;
+    if (Number.isFinite(recency.lastDays)) {
+      const days = Number(recency.lastDays);
+      if (days < 0) {
+        throw new Error('recency.lastDays must be non-negative');
+      }
+      const fromLastDays = nowMs() - Math.floor(days * 24 * 60 * 60 * 1000);
+      since = typeof since === 'number' ? Math.max(since, fromLastDays) : fromLastDays;
+    }
+
+    if (typeof since === 'number' && typeof until === 'number' && since > until) {
+      throw new Error('recency.since must be less than or equal to recency.until');
+    }
+
+    if (typeof since !== 'number' && typeof until !== 'number') {
+      return null;
+    }
+
+    return { since, until };
+  }
+
+  private matchesRecencyWindow(
+    value: number | undefined,
+    window: { since?: number; until?: number } | null
+  ): boolean {
+    if (!window) {
+      return true;
+    }
+    if (!Number.isFinite(value)) {
+      return false;
+    }
+    if (typeof window.since === 'number' && (value as number) < window.since) {
+      return false;
+    }
+    if (typeof window.until === 'number' && (value as number) > window.until) {
+      return false;
+    }
+    return true;
+  }
+
+  private matchesSearchQuery(
+    tokens: string[],
+    regex: RegExp | null,
+    fields: Array<string | undefined>
+  ): boolean {
+    if (!regex && tokens.length === 0) {
+      return true;
+    }
+    const searchable = fields
+      .filter((field): field is string => typeof field === 'string' && field.length > 0)
+      .join('\n');
+    if (searchable.length === 0) {
+      return false;
+    }
+    if (regex) {
+      return regex.test(searchable);
+    }
+    return this.matchesSearchTokens(tokens, [searchable]);
+  }
+
+  private getSearchTokens(query: string): string[] {
+    const normalized = typeof query === 'string' ? query.trim().toLowerCase() : '';
+    if (normalized.length === 0) {
+      return [];
+    }
+    return normalized.split(/\s+/).filter((token) => token.length > 0).slice(0, 8);
+  }
+
+  private matchesSearchTokens(tokens: string[], fields: Array<string | undefined>): boolean {
+    if (tokens.length === 0) {
+      return true;
+    }
+    const searchable = fields
+      .filter((field): field is string => typeof field === 'string' && field.length > 0)
+      .join('\n')
+      .toLowerCase();
+    if (searchable.length === 0) {
+      return false;
+    }
+    return tokens.every((token) => searchable.includes(token));
   }
 
   private mergeSession(
@@ -609,6 +1440,7 @@ export class VscodeBridge {
       source: incoming.source ?? existing.source,
       workspaceId: incoming.workspaceId ?? existing.workspaceId,
       workspaceDir: incoming.workspaceDir ?? existing.workspaceDir,
+      workspaceFile: incoming.workspaceFile ?? existing.workspaceFile,
       displayName: incoming.displayName ?? existing.displayName,
       jsonPath: incoming.jsonPath ?? existing.jsonPath,
       instanceId: existing.instanceId

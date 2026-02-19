@@ -1,7 +1,10 @@
 import * as React from 'react';
 import { View, ActivityIndicator, Text, Pressable } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
+import * as Application from 'expo-application';
+import Constants from 'expo-constants';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { useFriendRequests, useSocketStatus, useRealtimeStatus } from '@/sync/storage';
+import { useFriendRequests, useKnownMachines, useProfile, useSocketStatus, useRealtimeStatus } from '@/sync/storage';
 import { useVisibleSessionListViewData } from '@/hooks/useVisibleSessionListViewData';
 import { useIsTablet } from '@/utils/responsive';
 import { useRouter } from 'expo-router';
@@ -19,11 +22,46 @@ import { StatusDot } from './StatusDot';
 import { Ionicons } from '@expo/vector-icons';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
-import { isUsingCustomServer } from '@/sync/serverConfig';
+import { getServerInfo, getServerUrl, isUsingCustomServer } from '@/sync/serverConfig';
 import { trackFriendsSearch } from '@/track';
+import { isMachineOnline } from '@/utils/machineUtils';
+import { Modal } from '@/modal';
+import { apiSocket } from '@/sync/apiSocket';
+import type { Machine } from '@/sync/storageTypes';
+import { getDisplayName } from '@/sync/profile';
 
 interface MainViewProps {
     variant: 'phone' | 'sidebar';
+}
+
+function getMachineDisplayName(machine: Machine): string {
+    return machine.metadata?.displayName || machine.metadata?.host || machine.id;
+}
+
+function formatDaemonConnectionSummary(machine: Machine, index: number): string {
+    const daemonState = machine.daemonState as {
+        pid?: number;
+        httpPort?: number;
+        startedWithCliVersion?: string;
+    } | null;
+
+    const status = isMachineOnline(machine) ? 'online' : 'offline';
+    const pid = daemonState?.pid ?? machine.metadata?.daemonLastKnownPid;
+    const port = daemonState?.httpPort;
+    const cliVersion = daemonState?.startedWithCliVersion ?? machine.metadata?.happyCliVersion;
+    const activeAt = machine.activeAt ? new Date(machine.activeAt).toLocaleString() : 'unknown';
+
+    const lines = [
+        `${index + 1}. ${getMachineDisplayName(machine)}`,
+        `machineId: ${machine.id}`,
+        `status: ${status}`,
+        `pid: ${pid ?? 'unknown'}`,
+        `port: ${port ?? 'unknown'}`,
+        `cli: ${cliVersion ?? 'unknown'}`,
+        `lastSeen: ${activeAt}`,
+    ];
+
+    return lines.join('\n');
 }
 
 const styles = StyleSheet.create((theme) => ({
@@ -109,7 +147,7 @@ const TAB_TITLES = {
 type ActiveTabType = 'sessions' | 'inbox' | 'settings';
 
 // Header title component with connection status
-const HeaderTitle = React.memo(({ activeTab }: { activeTab: ActiveTabType }) => {
+const HeaderTitle = React.memo(({ activeTab, onStatusPress }: { activeTab: ActiveTabType; onStatusPress?: () => void }) => {
     const { theme } = useUnistyles();
     const socketStatus = useSocketStatus();
 
@@ -155,17 +193,33 @@ const HeaderTitle = React.memo(({ activeTab }: { activeTab: ActiveTabType }) => 
                 {t(TAB_TITLES[activeTab])}
             </Text>
             {connectionStatus.text && (
-                <View style={styles.statusContainer}>
-                    <StatusDot
-                        color={connectionStatus.color}
-                        isPulsing={connectionStatus.isPulsing}
-                        size={6}
-                        style={{ marginRight: 4 }}
-                    />
-                    <Text style={[styles.statusText, { color: connectionStatus.color }]}>
-                        {connectionStatus.text}
-                    </Text>
-                </View>
+                activeTab === 'sessions' && onStatusPress ? (
+                    <Pressable onPress={onStatusPress} hitSlop={8}>
+                        <View style={styles.statusContainer}>
+                            <StatusDot
+                                color={connectionStatus.color}
+                                isPulsing={connectionStatus.isPulsing}
+                                size={6}
+                                style={{ marginRight: 4 }}
+                            />
+                            <Text style={[styles.statusText, { color: connectionStatus.color }]}>
+                                {connectionStatus.text}
+                            </Text>
+                        </View>
+                    </Pressable>
+                ) : (
+                    <View style={styles.statusContainer}>
+                        <StatusDot
+                            color={connectionStatus.color}
+                            isPulsing={connectionStatus.isPulsing}
+                            size={6}
+                            style={{ marginRight: 4 }}
+                        />
+                        <Text style={[styles.statusText, { color: connectionStatus.color }]}>
+                            {connectionStatus.text}
+                        </Text>
+                    </View>
+                )
             )}
         </View>
     );
@@ -228,8 +282,11 @@ export const MainView = React.memo(({ variant }: MainViewProps) => {
     const sessionListViewData = useVisibleSessionListViewData();
     const isTablet = useIsTablet();
     const router = useRouter();
+    const socketStatus = useSocketStatus();
     const friendRequests = useFriendRequests();
     const realtimeStatus = useRealtimeStatus();
+    const profile = useProfile();
+    const machines = useKnownMachines();
 
     // Tab state management
     // NOTE: Zen tab removed - the feature never got to a useful state
@@ -242,6 +299,142 @@ export const MainView = React.memo(({ variant }: MainViewProps) => {
     const handleTabPress = React.useCallback((tab: TabType) => {
         setActiveTab(tab);
     }, []);
+
+    const onlineDaemons = React.useMemo(() => {
+        return [...machines]
+            .filter((machine) => isMachineOnline(machine))
+            .sort((a, b) => (b.activeAt || 0) - (a.activeAt || 0));
+    }, [machines]);
+
+    const primaryDaemon = onlineDaemons[0] ?? machines[0] ?? null;
+    const primaryDaemonIsOnline = primaryDaemon ? isMachineOnline(primaryDaemon) : false;
+    const handleChooseDaemon = React.useCallback(() => {
+        const connectedDaemon = onlineDaemons[0];
+        if (onlineDaemons.length === 1 && connectedDaemon) {
+            router.push((`/machine/${encodeURIComponent(connectedDaemon.id)}` as any));
+            return;
+        }
+
+        const selectedId = primaryDaemon ? encodeURIComponent(primaryDaemon.id) : '';
+        router.push((selectedId
+            ? `/new/pick/machine?selectedId=${selectedId}`
+            : '/new/pick/machine') as any);
+    }, [onlineDaemons, primaryDaemon, router]);
+
+    const handleConnectionStatusPress = React.useCallback(() => {
+        const serverInfo = getServerInfo();
+        const serverUrl = getServerUrl();
+        const socketDebug = apiSocket.getDebugInfo();
+        const daemonPreview = machines.slice(0, 3).map(formatDaemonConnectionSummary).join('\n\n');
+        const hasMoreDaemons = machines.length > 3;
+        const primaryLabel = primaryDaemon
+            ? `${getMachineDisplayName(primaryDaemon)} (${primaryDaemon.id}) [${primaryDaemonIsOnline ? 'online' : 'offline'}]`
+            : 'none';
+        const profileDisplayName = getDisplayName(profile) || profile.github?.login || 'unknown';
+        const endpointLabel = socketDebug.endpoint || `${serverInfo.hostname}${serverInfo.port ? `:${serverInfo.port}` : ''}`;
+        const appName = Constants.expoConfig?.name || 'Happy';
+        const bundleId = Application.applicationId || 'unknown';
+        const lastConnected = socketStatus.lastConnectedAt ? new Date(socketStatus.lastConnectedAt).toLocaleString() : 'never';
+        const lastDisconnected = socketStatus.lastDisconnectedAt ? new Date(socketStatus.lastDisconnectedAt).toLocaleString() : 'never';
+
+        const details = [
+            `App: ${appName} (${bundleId})`,
+            `Account: ${profileDisplayName} (${profile.id || 'unknown'})`,
+            `Server URL: ${serverUrl}`,
+            `Custom server override: ${serverInfo.isCustom ? 'yes' : 'no'}`,
+            `Socket endpoint: ${endpointLabel}`,
+            `Socket status: ${socketDebug.status}`,
+            `Socket ID: ${socketDebug.socketId ?? 'not connected'}`,
+            `Transport: ${socketDebug.transport ?? 'unknown'}`,
+            `Last connected: ${lastConnected}`,
+            `Last disconnected: ${lastDisconnected}`,
+            '',
+            `Known daemons: ${machines.length}`,
+            `Online daemons: ${onlineDaemons.length}`,
+            `Primary daemon: ${primaryLabel}`,
+            daemonPreview || 'No daemons discovered for this account yet.',
+            hasMoreDaemons ? `...and ${machines.length - 3} more` : '',
+            '',
+            'Tip: if simulator and phone disagree here, they are usually on different server/account contexts.',
+        ].filter(Boolean).join('\n');
+
+        const buttons: Array<{ text: string; style?: 'default' | 'cancel' | 'destructive'; onPress?: () => void }> = [];
+        if (primaryDaemon) {
+            buttons.push({
+                text: 'Open Primary Daemon',
+                onPress: () => {
+                    router.push((`/machine/${encodeURIComponent(primaryDaemon.id)}` as any));
+                }
+            });
+        }
+        if (machines.length > 1 && onlineDaemons.length !== 1) {
+            buttons.push({
+                text: 'Choose Daemon',
+                onPress: handleChooseDaemon,
+            });
+        }
+        buttons.push({
+            text: t('common.copy'),
+            onPress: () => {
+                void Clipboard.setStringAsync(details).then(() => {
+                    Modal.alert(t('common.success'), t('items.copiedToClipboard', { label: 'Connection details' }));
+                }).catch(() => {
+                    Modal.alert(t('common.error'), t('textSelection.failedToCopy'));
+                });
+            }
+        });
+        buttons.push({ text: t('common.ok'), style: 'cancel' });
+
+        Modal.alert('Connection Details', details, buttons);
+    }, [handleChooseDaemon, machines, onlineDaemons, primaryDaemon, primaryDaemonIsOnline, profile, socketStatus.lastConnectedAt, socketStatus.lastDisconnectedAt]);
+
+    const hasPromptedEmptySessionsRef = React.useRef<string | null>(null);
+    React.useEffect(() => {
+        const connected = socketStatus.status === 'connected';
+        const hasData = sessionListViewData !== null;
+        const hasVisibleSessions = !!sessionListViewData && sessionListViewData.length > 0;
+        const onSessionsTab = activeTab === 'sessions';
+
+        if (!connected || !onSessionsTab || !hasData || hasVisibleSessions) {
+            hasPromptedEmptySessionsRef.current = null;
+            return;
+        }
+
+        const promptKey = [
+            socketStatus.lastConnectedAt ?? 0,
+            socketStatus.status,
+            machines.length,
+            onlineDaemons.length,
+        ].join(':');
+
+        if (hasPromptedEmptySessionsRef.current === promptKey) {
+            return;
+        }
+        hasPromptedEmptySessionsRef.current = promptKey;
+
+        const buttons: Array<{ text: string; style?: 'default' | 'cancel' | 'destructive'; onPress?: () => void }> = [];
+        if (machines.length > 1 && onlineDaemons.length !== 1) {
+            buttons.push({
+                text: 'Choose Daemon',
+                onPress: handleChooseDaemon,
+            });
+        }
+        if (primaryDaemon) {
+            buttons.push({
+                text: 'Open Primary Daemon',
+                onPress: () => {
+                    router.push((`/machine/${encodeURIComponent(primaryDaemon.id)}` as any));
+                }
+            });
+        }
+        buttons.push({
+            text: t('terminal.connectionDetails'),
+            onPress: handleConnectionStatusPress,
+        });
+        buttons.push({ text: t('common.cancel'), style: 'cancel' });
+
+        Modal.alert('Connected but no terminals', 'No terminal sessions are visible yet. Open daemon selection or inspect connection details.', buttons);
+    }, [activeTab, handleChooseDaemon, handleConnectionStatusPress, machines.length, onlineDaemons.length, primaryDaemon, router, sessionListViewData, socketStatus.lastConnectedAt, socketStatus.status]);
 
     // Regular phone mode with tabs - define this before any conditional returns
     const renderTabContent = React.useCallback(() => {
@@ -302,7 +495,7 @@ export const MainView = React.memo(({ variant }: MainViewProps) => {
             <View style={styles.phoneContainer}>
                 <View style={{ backgroundColor: theme.colors.groupped.background }}>
                     <Header
-                        title={<HeaderTitle activeTab={activeTab as ActiveTabType} />}
+                        title={<HeaderTitle activeTab={activeTab as ActiveTabType} onStatusPress={handleConnectionStatusPress} />}
                         headerRight={() => <HeaderRight activeTab={activeTab as ActiveTabType} />}
                         headerLeft={() => <HeaderLogo />}
                         headerShadowVisible={false}

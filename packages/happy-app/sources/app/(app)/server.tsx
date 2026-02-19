@@ -75,6 +75,15 @@ const stylesheet = StyleSheet.create((theme) => ({
     },
 }));
 
+function formatHostLabel(url: string): string {
+    try {
+        const parsed = new URL(url);
+        return `${parsed.hostname}${parsed.port ? `:${parsed.port}` : ''}`;
+    } catch {
+        return url.trim();
+    }
+}
+
 export default function ServerConfigScreen() {
     const { theme } = useUnistyles();
     const styles = stylesheet;
@@ -134,10 +143,23 @@ export default function ServerConfigScreen() {
             return;
         }
 
+        const nextHostLabel = formatHostLabel(inputUrl);
+        const currentHostLabel = `${serverInfo.hostname}${serverInfo.port ? `:${serverInfo.port}` : ''}`;
+        const sameHost = nextHostLabel === currentHostLabel;
+        const reasonLine = sameHost
+            ? `Reason: the server secret/public key for "${nextHostLabel}" has changed.`
+            : `Reason: you are switching from "${currentHostLabel}" to "${nextHostLabel}".`;
+
         const confirmed = await Modal.confirm(
-            t('server.changeServer'),
-            t('server.continueWithServer'),
-            { confirmText: t('common.continue'), destructive: true }
+            'Server Identity Warning',
+            [
+                'The server identity check requires confirmation.',
+                `Host: ${nextHostLabel}`,
+                reasonLine,
+                '',
+                'Only continue if you trust this host and expected this change.',
+            ].join('\n'),
+            { confirmText: 'Trust Server', destructive: true }
         );
 
         if (confirmed) {

@@ -85,6 +85,25 @@ type MachineRpcHandlers = {
         newWindow?: boolean;
         appTarget?: 'vscode' | 'insiders';
     }) => any;
+    search: (params: {
+        query?: string;
+        entity: 'sessions' | 'workspaces' | 'both';
+        appTarget?: 'vscode' | 'insiders';
+        appTargets?: Array<'vscode' | 'insiders'>;
+        includeOpen?: boolean;
+        includeClosed?: boolean;
+        source?: {
+            live?: boolean;
+            disk?: boolean;
+        };
+        recency?: {
+            since?: number;
+            until?: number;
+            lastDays?: number;
+        };
+        textMode?: 'contains' | 'regex';
+        limit?: number;
+    }) => any;
 }
 
 export class ApiMachineClient {
@@ -115,7 +134,8 @@ export class ApiMachineClient {
         vscodeListSessions,
         vscodeSendMessage,
         vscodeGetSessionHistory,
-        vscodeOpenSession
+        vscodeOpenSession,
+        search
     }: MachineRpcHandlers) {
         // Register spawn session handler
         this.rpcHandlerManager.registerHandler('spawn-happy-session', async (params: any) => {
@@ -221,6 +241,81 @@ export class ApiMachineClient {
                 workspaceFile,
                 newWindow,
                 appTarget,
+            });
+        });
+
+        this.rpcHandlerManager.registerHandler('search', (params: any) => {
+            const {
+                query,
+                entity,
+                appTarget,
+                appTargets,
+                includeOpen,
+                includeClosed,
+                source,
+                recency,
+                textMode,
+                limit
+            } = params || {};
+
+            if (entity !== 'sessions' && entity !== 'workspaces' && entity !== 'both') {
+                throw new Error('entity must be one of: "sessions", "workspaces", "both"');
+            }
+            const normalizedEntity: 'sessions' | 'workspaces' | 'both' = entity;
+            if (query !== undefined && typeof query !== 'string') {
+                throw new Error('query must be a string when provided');
+            }
+            if (appTarget !== undefined && appTarget !== 'vscode' && appTarget !== 'insiders') {
+                throw new Error('appTarget must be "vscode" or "insiders"');
+            }
+            if (appTargets !== undefined && (!Array.isArray(appTargets) || appTargets.some((target) => target !== 'vscode' && target !== 'insiders'))) {
+                throw new Error('appTargets must be an array containing only "vscode" and/or "insiders"');
+            }
+            if (includeOpen !== undefined && typeof includeOpen !== 'boolean') {
+                throw new Error('includeOpen must be a boolean when provided');
+            }
+            if (includeClosed !== undefined && typeof includeClosed !== 'boolean') {
+                throw new Error('includeClosed must be a boolean when provided');
+            }
+            if (source !== undefined && (typeof source !== 'object' || source === null || Array.isArray(source))) {
+                throw new Error('source must be an object when provided');
+            }
+            if (source?.live !== undefined && typeof source.live !== 'boolean') {
+                throw new Error('source.live must be a boolean when provided');
+            }
+            if (source?.disk !== undefined && typeof source.disk !== 'boolean') {
+                throw new Error('source.disk must be a boolean when provided');
+            }
+            if (recency !== undefined && (typeof recency !== 'object' || recency === null || Array.isArray(recency))) {
+                throw new Error('recency must be an object when provided');
+            }
+            if (recency?.since !== undefined && !Number.isFinite(recency.since)) {
+                throw new Error('recency.since must be a finite number when provided');
+            }
+            if (recency?.until !== undefined && !Number.isFinite(recency.until)) {
+                throw new Error('recency.until must be a finite number when provided');
+            }
+            if (recency?.lastDays !== undefined && !Number.isFinite(recency.lastDays)) {
+                throw new Error('recency.lastDays must be a finite number when provided');
+            }
+            if (textMode !== undefined && textMode !== 'contains' && textMode !== 'regex') {
+                throw new Error('textMode must be "contains" or "regex"');
+            }
+            if (limit !== undefined && (!Number.isFinite(limit) || limit < 1)) {
+                throw new Error('limit must be a positive number when provided');
+            }
+
+            return search({
+                query,
+                entity: normalizedEntity,
+                appTarget,
+                appTargets,
+                includeOpen,
+                includeClosed,
+                source,
+                recency,
+                textMode,
+                limit,
             });
         });
     }

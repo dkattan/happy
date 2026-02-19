@@ -116,6 +116,7 @@ async function loadFonts() {
 
                 // Bricolage Grotesque  
                 'BricolageGrotesque-Bold': require('@/assets/fonts/BricolageGrotesque-Bold.ttf'),
+                Codicon: require('@vscode/codicons/dist/codicon.ttf'),
 
                 ...FontAwesome.font,
             });
@@ -140,6 +141,7 @@ async function loadFonts() {
 
                         // Bricolage Grotesque  
                         'BricolageGrotesque-Bold': require('@/assets/fonts/BricolageGrotesque-Bold.ttf'),
+                        Codicon: require('@vscode/codicons/dist/codicon.ttf'),
 
                         ...FontAwesome.font,
                     });

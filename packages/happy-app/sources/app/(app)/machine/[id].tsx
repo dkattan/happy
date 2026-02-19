@@ -82,6 +82,7 @@ type VscodeSessionSummary = {
     source: 'workspace' | 'empty-window';
     workspaceId?: string;
     workspaceDir?: string;
+    workspaceFile?: string;
     displayName?: string;
     jsonPath: string;
 };
@@ -89,6 +90,29 @@ type VscodeSessionSummary = {
 type VscodeBridgeSnapshot = {
     instances: VscodeInstanceSummary[];
     sessions: VscodeSessionSummary[];
+    flatSessions?: Array<VscodeSessionSummary & {
+        appTarget: 'vscode' | 'insiders';
+        appName: string;
+        instanceId?: string;
+        instanceLabel?: string;
+        workspaceOpen: boolean;
+        seenInLive: boolean;
+        seenOnDisk: boolean;
+    }>;
+    recentWorkspaces?: Array<{
+        id: string;
+        appTarget: 'vscode' | 'insiders';
+        appName: string;
+        kind: 'folder' | 'workspace-file';
+        path: string;
+        label: string;
+        recentRank: number;
+        workspaceOpen: boolean;
+        instanceId?: string;
+        lastActivityAt?: number;
+        seenInLive: boolean;
+        seenOnDisk: boolean;
+    }>;
     needsInputCount: number;
     updatedAt: number;
 };

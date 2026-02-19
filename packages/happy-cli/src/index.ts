@@ -393,14 +393,24 @@ import { execFileSync } from 'node:child_process'
       });
       child.unref();
 
-      // Wait for daemon to write state file (up to 5 seconds)
+      // Wait for daemon to come up.
+      // Startup can take several seconds when auth/version handoff runs.
+      const daemonStartTimeoutMs = Number.parseInt(
+        process.env.HAPPY_DAEMON_START_TIMEOUT_MS ?? '20000',
+        10
+      );
+      const pollIntervalMs = 200;
+      const maxWaitMs = Number.isFinite(daemonStartTimeoutMs) && daemonStartTimeoutMs > 0
+        ? daemonStartTimeoutMs
+        : 20000;
+      const startDeadline = Date.now() + maxWaitMs;
       let started = false;
-      for (let i = 0; i < 50; i++) {
+      while (Date.now() < startDeadline) {
         if (await checkIfDaemonRunningAndCleanupStaleState()) {
           started = true;
           break;
         }
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
       }
 
       if (started) {

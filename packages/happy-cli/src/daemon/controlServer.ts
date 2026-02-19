@@ -110,6 +110,7 @@ export function startDaemonControlServer({
             source: z.union([z.literal('workspace'), z.literal('empty-window')]),
             workspaceId: z.string().optional(),
             workspaceDir: z.string().optional(),
+            workspaceFile: z.string().optional(),
             displayName: z.string().optional(),
             jsonPath: z.string()
           }))
@@ -138,7 +139,14 @@ export function startDaemonControlServer({
             id: z.string(),
             role: z.union([z.literal('user'), z.literal('assistant')]),
             text: z.string(),
-            timestamp: z.number()
+            timestamp: z.number(),
+            fileTrees: z.array(z.object({
+              basePath: z.string().optional(),
+              roots: z.array(z.object({
+                label: z.string(),
+                children: z.array(z.any()).optional()
+              }))
+            })).optional()
           }))
         }),
         response: {

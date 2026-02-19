@@ -101,6 +101,24 @@ export default React.memo(() => {
         }
     };
 
+    const handleLinkDevicePress = React.useCallback(() => {
+        Modal.alert(
+            t('settingsAccount.linkNewDevice'),
+            'Scan a QR code from another device, or show a QR code on this device for another device to scan.',
+            [
+                {
+                    text: t('settings.scanQrCodeToAuthenticate'),
+                    onPress: connectAccount
+                },
+                {
+                    text: 'Show QR Code on This Device',
+                    onPress: () => router.push('/restore')
+                },
+                { text: t('common.cancel'), style: 'cancel' }
+            ]
+        );
+    }, [connectAccount, router]);
+
     return (
         <>
             <ItemList>
@@ -126,9 +144,9 @@ export default React.memo(() => {
                     {Platform.OS !== 'web' && (
                         <Item
                             title={t('settingsAccount.linkNewDevice')}
-                            subtitle={isConnecting ? t('common.scanning') : t('settingsAccount.linkNewDeviceSubtitle')}
+                            subtitle={isConnecting ? t('common.scanning') : 'Scan QR code or show one from this device'}
                             icon={<Ionicons name="qr-code-outline" size={29} color="#007AFF" />}
-                            onPress={connectAccount}
+                            onPress={handleLinkDevicePress}
                             disabled={isConnecting}
                             showChevron={false}
                         />

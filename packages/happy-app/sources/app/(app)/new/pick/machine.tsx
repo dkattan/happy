@@ -3,7 +3,7 @@ import { View, Text } from 'react-native';
 import { Stack, useRouter, useLocalSearchParams } from 'expo-router';
 import { CommonActions, useNavigation } from '@react-navigation/native';
 import { Typography } from '@/constants/Typography';
-import { useAllMachines, useSessions } from '@/sync/storage';
+import { useKnownMachines, useSessions } from '@/sync/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -36,12 +36,17 @@ export default function MachinePickerScreen() {
     const router = useRouter();
     const navigation = useNavigation();
     const params = useLocalSearchParams<{ selectedId?: string }>();
-    const machines = useAllMachines();
+    const machines = useKnownMachines();
     const sessions = useSessions();
 
     const selectedMachine = machines.find(m => m.id === params.selectedId) || null;
+    const onlineMachines = React.useMemo(() => {
+        return [...machines]
+            .filter((machine) => isMachineOnline(machine))
+            .sort((a, b) => (b.activeAt || 0) - (a.activeAt || 0));
+    }, [machines]);
 
-    const handleSelectMachine = (machine: typeof machines[0]) => {
+    const handleSelectMachine = React.useCallback((machine: typeof machines[0]) => {
         // Support both callback pattern (feature branch wizard) and navigation params (main)
         const machineId = machine.id;
 
@@ -56,7 +61,7 @@ export default function MachinePickerScreen() {
         }
 
         router.back();
-    };
+    }, [navigation, router]);
 
     // Compute recent machines from sessions
     const recentMachines = React.useMemo(() => {
@@ -82,6 +87,20 @@ export default function MachinePickerScreen() {
             .sort((a, b) => b.timestamp - a.timestamp)
             .map(item => item.machine);
     }, [sessions, machines]);
+
+    const hasAutoSelectedRef = React.useRef(false);
+    React.useEffect(() => {
+        if (hasAutoSelectedRef.current || onlineMachines.length !== 1) {
+            return;
+        }
+        const connectedMachine = onlineMachines[0];
+        if (!connectedMachine) {
+            return;
+        }
+
+        hasAutoSelectedRef.current = true;
+        handleSelectMachine(connectedMachine);
+    }, [handleSelectMachine, onlineMachines]);
 
     if (machines.length === 0) {
         return (

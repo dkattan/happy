@@ -9,6 +9,8 @@ import {
   resolveBaseUrl,
   resolveDaemonStatePath,
   type VscodeCommand,
+  type VscodeConversationFileTree,
+  type VscodeConversationFileTreeNode,
   type VscodeConversationMessage
 } from './daemonClient';
 import { scanVscodeSessions } from './sessionScan';
@@ -63,6 +65,120 @@ function asNumber(value: unknown): number | undefined {
   return typeof value === 'number' ? value : undefined;
 }
 
+const HOME_DIR = os.homedir();
+
+function normalizePathLike(value: string | null | undefined): string | undefined {
+  if (!value || typeof value !== 'string') {
+    return undefined;
+  }
+  const normalized = path.normalize(value).replace(/[\\/]+$/, '');
+  if (normalized.length === 0) {
+    return undefined;
+  }
+  return process.platform === 'win32'
+    ? normalized.toLowerCase()
+    : normalized;
+}
+
+function compactPathForDisplay(pathLike: string | undefined): string | undefined {
+  if (!pathLike || pathLike.length === 0) {
+    return undefined;
+  }
+  const resolvedPath = pathLike === '~'
+    ? HOME_DIR
+    : (pathLike.startsWith('~/') || pathLike.startsWith('~\\')
+      ? path.join(HOME_DIR, pathLike.slice(2))
+      : pathLike);
+  const normalizedPath = normalizePathLike(resolvedPath);
+  if (!normalizedPath) {
+    return undefined;
+  }
+  const normalizedHome = normalizePathLike(HOME_DIR);
+  if (!normalizedHome) {
+    return normalizedPath;
+  }
+  if (normalizedPath === normalizedHome) {
+    return '~';
+  }
+
+  const homePrefix = `${normalizedHome}${path.sep}`;
+  if (normalizedPath.startsWith(homePrefix)) {
+    return `~${normalizedPath.slice(normalizedHome.length)}`;
+  }
+  return normalizedPath;
+}
+
+function getPathTail(pathLike: string | null | undefined): string | undefined {
+  if (!pathLike || typeof pathLike !== 'string') {
+    return undefined;
+  }
+  const parts = pathLike.split(/[\\/]/).filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : undefined;
+}
+
+function extractUriPath(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    return value;
+  }
+  const record = asRecord(value);
+  if (!record) {
+    return undefined;
+  }
+  const fsPath = asString(record.fsPath);
+  if (fsPath && fsPath.length > 0) {
+    return fsPath;
+  }
+  const pathValue = asString(record.path);
+  if (pathValue && pathValue.length > 0) {
+    return pathValue;
+  }
+  const external = asString(record.external);
+  if (external && external.length > 0) {
+    return external;
+  }
+  return undefined;
+}
+
+function toFileTreeNode(value: unknown): VscodeConversationFileTreeNode | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const label = asString(record.label)
+    ?? asString(record.name)
+    ?? getPathTail(extractUriPath(record.uri))
+    ?? undefined;
+
+  if (!label || label.length === 0) {
+    return null;
+  }
+
+  const rawChildren = Array.isArray(record.children) ? record.children : [];
+  const children = rawChildren
+    .map((child) => toFileTreeNode(child))
+    .filter((child): child is VscodeConversationFileTreeNode => child !== null);
+
+  if (children.length > 0) {
+    return { label, children };
+  }
+  return { label };
+}
+
+function toFileTrees(value: unknown, basePathHint?: string): VscodeConversationFileTree[] {
+  const rootsSource = Array.isArray(value) ? value : [value];
+  const roots = rootsSource
+    .map((entry) => toFileTreeNode(entry))
+    .filter((entry): entry is VscodeConversationFileTreeNode => entry !== null);
+  if (roots.length === 0) {
+    return [];
+  }
+  return [{
+    basePath: compactPathForDisplay(basePathHint),
+    roots
+  }];
+}
+
 function extractUserText(request: ChatRequestRecord): string {
   const message = asRecord(request.message);
   if (!message) return '';
@@ -84,11 +200,17 @@ function extractUserText(request: ChatRequestRecord): string {
   return chunks.join('\n').trim();
 }
 
-function extractAssistantText(request: ChatRequestRecord): string {
+function extractAssistantPayload(request: ChatRequestRecord): {
+  text: string;
+  fileTrees: VscodeConversationFileTree[];
+} {
   const response = Array.isArray(request.response) ? request.response : [];
-  if (response.length === 0) return '';
+  if (response.length === 0) {
+    return { text: '', fileTrees: [] };
+  }
 
   const chunks: string[] = [];
+  const fileTrees: VscodeConversationFileTree[] = [];
   for (const entry of response) {
     const record = asRecord(entry);
     if (!record) continue;
@@ -98,12 +220,22 @@ function extractAssistantText(request: ChatRequestRecord): string {
       continue;
     }
 
+    if (kind === 'treedata' || kind === 'filetree' || record.treeData !== undefined) {
+      const treeData = record.treeData ?? record.value;
+      const basePath = extractUriPath(record.uri) ?? extractUriPath(asRecord(record.treeData)?.uri);
+      fileTrees.push(...toFileTrees(treeData, basePath));
+      continue;
+    }
+
     const text = asString(record.value) ?? asString(record.text) ?? asString(record.content) ?? asString(record.markdown);
     if (!text || text.trim().length === 0) continue;
     chunks.push(text);
   }
 
-  return chunks.join('').trim();
+  return {
+    text: chunks.join('').trim(),
+    fileTrees
+  };
 }
 
 function extractMessagesFromExport(sessionId: string, parsed: ChatSessionExportJson, limit: number = 250): VscodeConversationMessage[] {
@@ -127,13 +259,14 @@ function extractMessagesFromExport(sessionId: string, parsed: ChatSessionExportJ
       });
     }
 
-    const assistantText = extractAssistantText(request);
-    if (assistantText.length > 0) {
+    const assistant = extractAssistantPayload(request);
+    if (assistant.text.length > 0 || assistant.fileTrees.length > 0) {
       messages.push({
         id: `${sessionId}:a:${i}`,
         role: 'assistant',
-        text: assistantText,
-        timestamp: timestamp + 1
+        text: assistant.text,
+        timestamp: timestamp + 1,
+        fileTrees: assistant.fileTrees.length > 0 ? assistant.fileTrees : undefined
       });
     }
   }
@@ -583,7 +716,12 @@ class HappyBridge {
       return;
     }
 
-    const payloadHash = JSON.stringify(messages.map((message) => [message.role, message.text, message.timestamp]));
+    const payloadHash = JSON.stringify(messages.map((message) => ({
+      role: message.role,
+      text: message.text,
+      timestamp: message.timestamp,
+      fileTrees: message.fileTrees
+    })));
     if (this.liveHistoryHashes.get(sessionId) === payloadHash) {
       return;
     }

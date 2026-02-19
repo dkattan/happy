@@ -38,6 +38,8 @@
   ],
   "exclude": [
     "sources/trash/**/*",
-    "node_modules"
+    "node_modules",
+    "**/* 2.ts",
+    "**/* 2.tsx"
   ]
 }

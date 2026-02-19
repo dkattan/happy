@@ -13,6 +13,44 @@ import {
 } from './types';
 import { Socket } from 'socket.io-client';
 
+function serializeForLog(value: unknown): unknown {
+    if (value instanceof Error) {
+        const serializedError: Record<string, unknown> = {
+            name: value.name,
+            message: value.message,
+            stack: value.stack,
+        };
+
+        const errorObject = value as Error & Record<string, unknown> & { cause?: unknown };
+        if (errorObject.cause !== undefined) {
+            serializedError.cause = serializeForLog(errorObject.cause);
+        }
+
+        for (const [key, nestedValue] of Object.entries(errorObject)) {
+            if (key === 'name' || key === 'message' || key === 'stack' || key === 'cause') {
+                continue;
+            }
+            serializedError[key] = serializeForLog(nestedValue);
+        }
+
+        return serializedError;
+    }
+
+    if (Array.isArray(value)) {
+        return value.map(item => serializeForLog(item));
+    }
+
+    if (value && typeof value === 'object') {
+        const serializedObject: Record<string, unknown> = {};
+        for (const [key, nestedValue] of Object.entries(value)) {
+            serializedObject[key] = serializeForLog(nestedValue);
+        }
+        return serializedObject;
+    }
+
+    return value;
+}
+
 export class RpcHandlerManager {
     private handlers: RpcHandlerMap = new Map();
     private readonly scopePrefix: string;
@@ -78,9 +116,14 @@ export class RpcHandlerManager {
             this.logger('[RPC] Sending encrypted response', { method: request.method, responseLength: encryptedResponse.length });
             return encryptedResponse;
         } catch (error) {
-            this.logger('[RPC] [ERROR] Error handling request', { error });
+            this.logger('[RPC] [ERROR] Error handling request', {
+                method: request.method,
+                error: serializeForLog(error),
+            });
             const errorResponse = {
-                error: error instanceof Error ? error.message : 'Unknown error'
+                error: error instanceof Error
+                    ? error.message
+                    : (typeof error === 'string' ? error : 'Unknown error')
             };
             return encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, errorResponse));
         }

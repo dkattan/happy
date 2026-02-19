@@ -1,0 +1,64 @@
+require "shellwords"
+
+default_platform(:ios)
+
+platform :ios do
+  desc "Build production iOS app and upload to TestFlight"
+  lane :upload_testflight do |options|
+    build_number = options[:build_number] || Time.now.utc.strftime("%Y%m%d%H%M")
+    version_number = options[:version] || "1.6.2"
+    bundle_id = options[:bundle_id] || ENV["IOS_APP_IDENTIFIER"] || "net.immense.happy"
+    team_id = options[:team_id] || ENV["APPLE_TEAM_ID"]
+    xcargs_parts = [
+      "-allowProvisioningUpdates",
+      "PRODUCT_BUNDLE_IDENTIFIER=#{bundle_id}",
+      "CURRENT_PROJECT_VERSION=#{build_number}",
+      "MARKETING_VERSION=#{version_number}"
+    ]
+    xcargs_parts << "DEVELOPMENT_TEAM=#{team_id}" if team_id
+
+    if ENV["ASC_KEY_ID"] && ENV["ASC_ISSUER_ID"] && ENV["ASC_KEY_FILE"]
+      xcargs_parts << "-authenticationKeyPath #{Shellwords.escape(ENV["ASC_KEY_FILE"])}"
+      xcargs_parts << "-authenticationKeyID #{ENV["ASC_KEY_ID"]}"
+      xcargs_parts << "-authenticationKeyIssuerID #{ENV["ASC_ISSUER_ID"]}"
+    end
+
+    xcargs = xcargs_parts.join(" ")
+
+    build_options = {
+      workspace: "Happydev.xcworkspace",
+      scheme: options[:scheme] || "Happydev",
+      configuration: "Release",
+      clean: true,
+      export_method: "app-store",
+      xcargs: xcargs,
+      output_directory: "build",
+      output_name: "Happydev.ipa"
+    }
+    build_options[:export_team_id] = team_id if team_id
+    build_app(build_options)
+
+    api_key = nil
+    if ENV["ASC_KEY_ID"] && ENV["ASC_ISSUER_ID"] && (ENV["ASC_KEY_FILE"] || ENV["ASC_KEY_CONTENT"])
+      api_key = app_store_connect_api_key(
+        key_id: ENV["ASC_KEY_ID"],
+        issuer_id: ENV["ASC_ISSUER_ID"],
+        key_filepath: ENV["ASC_KEY_FILE"],
+        key_content: ENV["ASC_KEY_CONTENT"],
+        is_key_content_base64: ENV["ASC_KEY_IS_BASE64"] == "1",
+        duration: 1200,
+        in_house: false
+      )
+    end
+
+    asc_app_id = options[:asc_app_id] || ENV["ASC_APP_ID"]
+    upload_options = {
+      app_identifier: bundle_id,
+      skip_waiting_for_build_processing: options[:wait] == "true" ? false : true
+    }
+    upload_options[:apple_id] = asc_app_id if asc_app_id
+    upload_options[:api_key] = api_key if api_key
+
+    upload_to_testflight(upload_options)
+  end
+end
